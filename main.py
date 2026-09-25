@@ -1,84 +1,124 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
-from typing import Optional
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import math
-import traceback
 from datetime import datetime, timezone
 
 
 # ============================================================
 # COMMODITY ROTATION BOT
-# Version: 1.0
+# Version: 1.1
+#
+# LONG ONLY
+# NO SHORT
+# NO LEVERAGE
+# NO AUTOMATIC ORDERS
 #
 # Amaç:
-# - Kaldıraç yok
-# - Short yok
-# - Futures işlemi yok
-# - Sadece ABD borsasında işlem gören ETF/ETP'leri takip eder
-# - İşlemleri otomatik yapmaz
-# - Sadece analiz ve sinyal üretir
-#
-# İlk sürüm:
-# GLD  = Gold
-# SLV  = Silver
-# USO  = Oil
-# DBC  = Broad Commodities
+# ABD borsasında işlem gören emtia ETF/ETP'lerini taramak,
+# trend + momentum + risk yapısını ölçmek ve manuel işlem
+# için AL_ADAYI / IZLE / BEKLE sinyali üretmek.
 # ============================================================
 
 
 app = FastAPI(
     title="Commodity Rotation Bot",
-    description="Long-only commodity ETF trend and rotation signal system",
-    version="1.0.0",
+    description="Long-only commodity ETF/ETP rotation system",
+    version="1.1.0",
 )
 
-
-MODEL_NAME = "COMMODITY-ROTATION-V1"
+MODEL_NAME = "COMMODITY-ROTATION-V1.1"
 
 
 # ============================================================
-# TAKİP EDİLECEK ÜRÜNLER
+# EMTİA EVRENİ
 # ============================================================
 
 ASSETS = {
+
+    # ---------------- METALS ----------------
+
     "GLD": {
         "name": "Gold",
         "tr_name": "Altın",
-        "category": "PRECIOUS_METALS",
+        "group": "METALS",
     },
+
     "SLV": {
         "name": "Silver",
         "tr_name": "Gümüş",
-        "category": "PRECIOUS_METALS",
+        "group": "METALS",
     },
+
+    "CPER": {
+        "name": "Copper",
+        "tr_name": "Bakır",
+        "group": "METALS",
+    },
+
+    # ---------------- ENERGY ----------------
+
     "USO": {
-        "name": "Oil",
+        "name": "Crude Oil",
         "tr_name": "Petrol",
-        "category": "ENERGY",
+        "group": "ENERGY",
     },
+
+    "UNG": {
+        "name": "Natural Gas",
+        "tr_name": "Doğal Gaz",
+        "group": "ENERGY",
+    },
+
+    # ---------------- AGRICULTURE ----------------
+
+    "DBA": {
+        "name": "Agriculture Basket",
+        "tr_name": "Tarım Sepeti",
+        "group": "AGRICULTURE",
+    },
+
+    "WEAT": {
+        "name": "Wheat",
+        "tr_name": "Buğday",
+        "group": "AGRICULTURE",
+    },
+
+    "CORN": {
+        "name": "Corn",
+        "tr_name": "Mısır",
+        "group": "AGRICULTURE",
+    },
+
+    "SOYB": {
+        "name": "Soybeans",
+        "tr_name": "Soya",
+        "group": "AGRICULTURE",
+    },
+
+    # ---------------- BENCHMARK ----------------
+
     "DBC": {
         "name": "Broad Commodities",
         "tr_name": "Geniş Emtia Sepeti",
-        "category": "BROAD_COMMODITY",
+        "group": "BROAD_COMMODITY",
     },
 }
 
 
 # ============================================================
-# YARDIMCI FONKSİYONLAR
+# GENERAL HELPERS
 # ============================================================
 
+def utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
 def safe_float(value, digits=4):
-    """
-    numpy/pandas sayılarını JSON uyumlu Python float'a çevirir.
-    NaN ve infinity değerlerini None yapar.
-    """
+
     try:
-        if value is None:
-            return None
 
         value = float(value)
 
@@ -88,13 +128,13 @@ def safe_float(value, digits=4):
         return round(value, digits)
 
     except Exception:
+
         return None
 
 
 def safe_int(value):
+
     try:
-        if value is None:
-            return None
 
         if pd.isna(value):
             return None
@@ -102,136 +142,104 @@ def safe_int(value):
         return int(value)
 
     except Exception:
+
         return None
 
 
-def utc_now():
-    return datetime.now(timezone.utc).isoformat()
-
-
 # ============================================================
-# VERİ ÇEKME
+# DATA
 # ============================================================
 
-def download_history(
-    symbol: str,
-    period: str = "10y",
-    interval: str = "1d",
-):
-    """
-    Yahoo Finance üzerinden tarihsel veri çeker.
-
-    auto_adjust=True:
-    Bölünme ve temettü etkilerinin fiyat serisine yansıtılması açısından
-    backtestlerde daha kullanışlı bir seri sağlar.
-    """
+def download_history(symbol, period="10y"):
 
     symbol = symbol.upper()
 
-    try:
+    df = yf.download(
+        symbol,
+        period=period,
+        interval="1d",
+        auto_adjust=True,
+        progress=False,
+        threads=False,
+    )
 
-        df = yf.download(
-            symbol,
-            period=period,
-            interval=interval,
-            auto_adjust=True,
-            progress=False,
-            threads=False,
+    if df is None or df.empty:
+
+        raise ValueError(
+            f"{symbol} için veri alınamadı."
         )
 
-        if df is None or df.empty:
-            raise ValueError(f"{symbol} için veri alınamadı.")
+    if isinstance(df.columns, pd.MultiIndex):
 
-        # yfinance bazı sürümlerde MultiIndex döndürebiliyor.
-        if isinstance(df.columns, pd.MultiIndex):
+        try:
 
-            if symbol in df.columns.get_level_values(-1):
-                try:
-                    df = df.xs(
-                        symbol,
-                        axis=1,
-                        level=-1,
-                        drop_level=True,
-                    )
-                except Exception:
-                    pass
+            df = df.xs(
+                symbol,
+                axis=1,
+                level=-1,
+                drop_level=True,
+            )
 
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = [
-                    col[0] if isinstance(col, tuple) else col
-                    for col in df.columns
-                ]
+        except Exception:
 
-        df = df.copy()
+            df.columns = [
+                x[0] if isinstance(x, tuple) else x
+                for x in df.columns
+            ]
 
-        required_columns = [
+    required = [
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Volume",
+    ]
+
+    for column in required:
+
+        if column not in df.columns:
+
+            raise ValueError(
+                f"{symbol}: {column} bulunamadı."
+            )
+
+    df = df[required].copy()
+
+    for column in required:
+
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="coerce",
+        )
+
+    df = df.dropna(
+        subset=[
             "Open",
             "High",
             "Low",
             "Close",
-            "Volume",
         ]
+    )
 
-        for column in required_columns:
-            if column not in df.columns:
-                raise ValueError(
-                    f"{symbol}: {column} kolonu bulunamadı."
-                )
+    if len(df) < 220:
 
-        df = df[
-            [
-                "Open",
-                "High",
-                "Low",
-                "Close",
-                "Volume",
-            ]
-        ].copy()
-
-        for column in df.columns:
-            df[column] = pd.to_numeric(
-                df[column],
-                errors="coerce",
-            )
-
-        df = df.dropna(
-            subset=[
-                "Open",
-                "High",
-                "Low",
-                "Close",
-            ]
-        )
-
-        if len(df) < 220:
-            raise ValueError(
-                f"{symbol}: teknik analiz için yeterli veri yok. "
-                f"Satır sayısı: {len(df)}"
-            )
-
-        return df
-
-    except Exception as exc:
         raise ValueError(
-            f"{symbol} veri hatası: {str(exc)}"
+            f"{symbol}: yeterli tarihsel veri yok."
         )
 
+    return df
+
 
 # ============================================================
-# TEKNİK GÖSTERGELER
+# RSI
 # ============================================================
 
-def calculate_rsi(
-    close: pd.Series,
-    period: int = 14,
-):
-    """
-    Wilder benzeri exponential RSI.
-    """
+def calculate_rsi(close, period=14):
 
     delta = close.diff()
 
     gain = delta.clip(lower=0)
+
     loss = -delta.clip(upper=0)
 
     avg_gain = gain.ewm(
@@ -246,70 +254,74 @@ def calculate_rsi(
         min_periods=period,
     ).mean()
 
-    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rs = (
+        avg_gain
+        /
+        avg_loss.replace(0, np.nan)
+    )
 
     rsi = 100 - (
         100 / (1 + rs)
     )
 
-    # Hiç kayıp olmayan çok güçlü serilerde RSI 100 kabul edilebilir.
-    rsi = rsi.fillna(100)
-
-    return rsi
+    return rsi.fillna(100)
 
 
-def calculate_atr(
-    df: pd.DataFrame,
-    period: int = 14,
-):
-    """
-    Average True Range.
-    """
+# ============================================================
+# ATR
+# ============================================================
 
-    high_low = (
-        df["High"] - df["Low"]
+def calculate_atr(df, period=14):
+
+    previous_close = (
+        df["Close"].shift(1)
+    )
+
+    tr1 = (
+        df["High"]
+        -
+        df["Low"]
     ).abs()
 
-    high_close = (
-        df["High"] - df["Close"].shift(1)
+    tr2 = (
+        df["High"]
+        -
+        previous_close
     ).abs()
 
-    low_close = (
-        df["Low"] - df["Close"].shift(1)
+    tr3 = (
+        df["Low"]
+        -
+        previous_close
     ).abs()
 
     true_range = pd.concat(
         [
-            high_low,
-            high_close,
-            low_close,
+            tr1,
+            tr2,
+            tr3,
         ],
         axis=1,
     ).max(axis=1)
 
-    atr = true_range.ewm(
+    return true_range.ewm(
         alpha=1 / period,
         adjust=False,
         min_periods=period,
     ).mean()
 
-    return atr
 
+# ============================================================
+# INDICATORS
+# ============================================================
 
-def calculate_indicators(
-    df: pd.DataFrame,
-):
-    """
-    Commodity Rotation v1 göstergeleri.
-    """
+def calculate_indicators(df):
 
     df = df.copy()
 
     close = df["Close"]
 
-    # --------------------------------------------------------
     # TREND
-    # --------------------------------------------------------
 
     df["EMA20"] = close.ewm(
         span=20,
@@ -331,9 +343,7 @@ def calculate_indicators(
         adjust=False,
     ).mean()
 
-    # --------------------------------------------------------
     # MOMENTUM
-    # --------------------------------------------------------
 
     df["MOM20"] = (
         close.pct_change(20) * 100
@@ -347,29 +357,27 @@ def calculate_indicators(
         close.pct_change(120) * 100
     )
 
-    # --------------------------------------------------------
     # RSI
-    # --------------------------------------------------------
 
     df["RSI14"] = calculate_rsi(
         close,
         14,
     )
 
-    # --------------------------------------------------------
     # MACD
-    # --------------------------------------------------------
+
+    ema12 = close.ewm(
+        span=12,
+        adjust=False,
+    ).mean()
+
+    ema26 = close.ewm(
+        span=26,
+        adjust=False,
+    ).mean()
 
     df["MACD"] = (
-        close.ewm(
-            span=12,
-            adjust=False,
-        ).mean()
-        -
-        close.ewm(
-            span=26,
-            adjust=False,
-        ).mean()
+        ema12 - ema26
     )
 
     df["MACD_SIGNAL"] = (
@@ -387,9 +395,7 @@ def calculate_indicators(
         df["MACD_SIGNAL"]
     )
 
-    # --------------------------------------------------------
-    # ATR / VOLATILITY
-    # --------------------------------------------------------
+    # ATR
 
     df["ATR14"] = calculate_atr(
         df,
@@ -404,9 +410,7 @@ def calculate_indicators(
         100
     )
 
-    # --------------------------------------------------------
     # VOLUME
-    # --------------------------------------------------------
 
     df["VOL20"] = (
         df["Volume"]
@@ -420,9 +424,7 @@ def calculate_indicators(
         df["VOL20"]
     )
 
-    # --------------------------------------------------------
-    # DISTANCE FROM EMA
-    # --------------------------------------------------------
+    # DISTANCE TO EMA
 
     df["DIST_EMA20"] = (
         (
@@ -451,11 +453,9 @@ def calculate_indicators(
         - 1
     ) * 100
 
-    # --------------------------------------------------------
-    # DRAWDOWN
-    # --------------------------------------------------------
+    # 1 YEAR DRAWDOWN
 
-    rolling_high = (
+    high252 = (
         close
         .rolling(252)
         .max()
@@ -465,7 +465,7 @@ def calculate_indicators(
         (
             close
             /
-            rolling_high
+            high252
         )
         - 1
     ) * 100
@@ -474,113 +474,131 @@ def calculate_indicators(
 
 
 # ============================================================
-# PUANLAMA MODELİ
+# SCORE ENGINE
 # ============================================================
 
 def calculate_score(row):
-    """
-    Maksimum 100 puan.
-
-    V1 bilinçli olarak basit ve açıklanabilir tutuluyor.
-
-    TREND          40
-    MOMENTUM       30
-    MACD           10
-    RSI            10
-    RISK/VOL       10
-    -----------------
-    TOTAL         100
-    """
 
     score = 0
 
     reasons = []
+
     warnings = []
 
     close = row["Close"]
 
     ema20 = row["EMA20"]
+
     ema50 = row["EMA50"]
+
     ema200 = row["EMA200"]
 
     mom20 = row["MOM20"]
+
     mom60 = row["MOM60"]
+
     mom120 = row["MOM120"]
 
     rsi = row["RSI14"]
 
-    macd = row["MACD"]
-    macd_signal = row["MACD_SIGNAL"]
-    macd_hist = row["MACD_HIST"]
-
     atr_pct = row["ATR_PCT"]
 
+    macd = row["MACD"]
+
+    macd_signal = row["MACD_SIGNAL"]
+
+    macd_hist = row["MACD_HIST"]
+
     # ========================================================
-    # 1. TREND
+    # TREND - MAX 40
     # ========================================================
 
     if close > ema200:
+
         score += 15
+
         reasons.append(
             "Fiyat EMA200 üzerinde"
         )
+
     else:
+
         warnings.append(
             "Fiyat EMA200 altında"
         )
 
     if ema50 > ema200:
+
         score += 10
+
         reasons.append(
             "EMA50 > EMA200"
         )
+
     else:
+
         warnings.append(
             "EMA50 EMA200 üzerinde değil"
         )
 
     if ema20 > ema50:
+
         score += 10
+
         reasons.append(
             "EMA20 > EMA50"
         )
+
     else:
+
         warnings.append(
             "Kısa vadeli trend zayıf"
         )
 
     if close > ema20:
+
         score += 5
+
         reasons.append(
             "Fiyat EMA20 üzerinde"
         )
 
     # ========================================================
-    # 2. MOMENTUM
+    # MOMENTUM - MAX 30
     # ========================================================
 
     if mom20 > 0:
+
         score += 5
+
         reasons.append(
             "20 günlük momentum pozitif"
         )
 
     if mom60 > 0:
+
         score += 10
+
         reasons.append(
             "60 günlük momentum pozitif"
         )
+
     else:
+
         warnings.append(
             "60 günlük momentum negatif"
         )
 
     if mom120 > 0:
+
         score += 10
+
         reasons.append(
             "120 günlük momentum pozitif"
         )
+
     else:
+
         warnings.append(
             "120 günlük momentum negatif"
         )
@@ -590,70 +608,97 @@ def calculate_score(row):
         and mom60 > 0
         and mom120 > 0
     ):
+
         score += 5
+
         reasons.append(
             "Momentum zaman dilimleri uyumlu"
         )
 
     # ========================================================
-    # 3. MACD
+    # MACD - MAX 10
     # ========================================================
 
     if macd > macd_signal:
+
         score += 5
+
         reasons.append(
             "MACD signal üzerinde"
         )
 
+    else:
+
+        warnings.append(
+            "MACD kısa vadeli momentum zayıflıyor"
+        )
+
     if macd_hist > 0:
+
         score += 5
+
         reasons.append(
             "MACD histogram pozitif"
         )
 
     # ========================================================
-    # 4. RSI
+    # RSI - MAX 10
     # ========================================================
 
     if 45 <= rsi <= 65:
+
         score += 10
+
         reasons.append(
             "RSI sağlıklı momentum bölgesinde"
         )
 
     elif 40 <= rsi < 45:
+
         score += 5
 
     elif 65 < rsi <= 70:
+
         score += 5
+
         warnings.append(
             "RSI yükselmiş durumda"
         )
 
     elif rsi > 70:
+
         warnings.append(
             "RSI aşırı alım bölgesinde"
         )
 
-    elif rsi < 40:
+    else:
+
         warnings.append(
             "RSI zayıf"
         )
 
     # ========================================================
-    # 5. VOLATILITY
+    # VOLATILITY - MAX 10
     # ========================================================
 
     if atr_pct <= 3:
+
         score += 10
+
         reasons.append(
             "Volatilite kontrollü"
         )
 
     elif atr_pct <= 5:
+
         score += 5
 
+        reasons.append(
+            "Volatilite orta düzeyde"
+        )
+
     else:
+
         warnings.append(
             "Volatilite yüksek"
         )
@@ -661,8 +706,8 @@ def calculate_score(row):
     score = max(
         0,
         min(
-            100,
             int(score),
+            100,
         ),
     )
 
@@ -674,43 +719,34 @@ def calculate_score(row):
 
 
 # ============================================================
-# SİNYAL MOTORU
+# SIGNAL
 # ============================================================
 
 def determine_signal(
     row,
     score,
 ):
-    """
-    İlk versiyon sinyal mantığı.
-
-    AL_ADAYI:
-    Güçlü trend + momentum + yeterli puan.
-
-    IZLE:
-    Yapı fena değil ancak giriş için yeterince güçlü değil.
-
-    BEKLE:
-    Trend filtresi geçilmemiş.
-    """
 
     close = row["Close"]
 
     ema20 = row["EMA20"]
+
     ema50 = row["EMA50"]
+
     ema200 = row["EMA200"]
 
-    rsi = row["RSI14"]
-
     mom60 = row["MOM60"]
+
     mom120 = row["MOM120"]
+
+    rsi = row["RSI14"]
 
     long_term_trend = (
         close > ema200
         and ema50 > ema200
     )
 
-    medium_trend = (
+    medium_term_trend = (
         ema20 > ema50
     )
 
@@ -726,39 +762,43 @@ def determine_signal(
     if (
         score >= 75
         and long_term_trend
-        and medium_trend
+        and medium_term_trend
         and momentum_ok
         and rsi_ok
     ):
+
         return "AL_ADAYI"
 
     if (
         score >= 60
         and long_term_trend
     ):
+
         return "IZLE"
 
     return "BEKLE"
 
 
 # ============================================================
-# TEK SEMBOL ANALİZİ
+# ANALYZE SINGLE ASSET
 # ============================================================
 
 def analyze_symbol(
-    symbol: str,
-    period: str = "10y",
+    symbol,
+    period="10y",
 ):
+
     symbol = symbol.upper()
 
     if symbol not in ASSETS:
+
         raise ValueError(
-            f"{symbol} V1 ürün listesinde yok."
+            f"{symbol} ürün listesinde yok."
         )
 
     df = download_history(
-        symbol=symbol,
-        period=period,
+        symbol,
+        period,
     )
 
     df = calculate_indicators(
@@ -768,8 +808,9 @@ def analyze_symbol(
     clean = df.dropna().copy()
 
     if clean.empty:
+
         raise ValueError(
-            f"{symbol}: göstergeler hesaplanamadı."
+            f"{symbol}: gösterge üretilemedi."
         )
 
     row = clean.iloc[-1]
@@ -785,12 +826,17 @@ def analyze_symbol(
 
     asset = ASSETS[symbol]
 
-    result = {
+    return {
+
         "model": MODEL_NAME,
+
         "symbol": symbol,
+
         "name": asset["name"],
+
         "tr_name": asset["tr_name"],
-        "category": asset["category"],
+
+        "group": asset["group"],
 
         "date": str(
             clean.index[-1].date()
@@ -806,45 +852,58 @@ def analyze_symbol(
         "score": score,
 
         "trend": {
+
             "ema20": safe_float(
                 row["EMA20"],
                 2,
             ),
+
             "ema50": safe_float(
                 row["EMA50"],
                 2,
             ),
+
             "ema100": safe_float(
                 row["EMA100"],
                 2,
             ),
+
             "ema200": safe_float(
                 row["EMA200"],
                 2,
             ),
-            "distance_ema20_pct": safe_float(
-                row["DIST_EMA20"],
-                2,
-            ),
-            "distance_ema50_pct": safe_float(
-                row["DIST_EMA50"],
-                2,
-            ),
-            "distance_ema200_pct": safe_float(
-                row["DIST_EMA200"],
-                2,
-            ),
+
+            "distance_ema20_pct":
+                safe_float(
+                    row["DIST_EMA20"],
+                    2,
+                ),
+
+            "distance_ema50_pct":
+                safe_float(
+                    row["DIST_EMA50"],
+                    2,
+                ),
+
+            "distance_ema200_pct":
+                safe_float(
+                    row["DIST_EMA200"],
+                    2,
+                ),
         },
 
         "momentum": {
+
             "20d_pct": safe_float(
                 row["MOM20"],
                 2,
             ),
+
             "60d_pct": safe_float(
                 row["MOM60"],
                 2,
             ),
+
             "120d_pct": safe_float(
                 row["MOM120"],
                 2,
@@ -857,14 +916,17 @@ def analyze_symbol(
         ),
 
         "macd": {
+
             "line": safe_float(
                 row["MACD"],
                 4,
             ),
+
             "signal": safe_float(
                 row["MACD_SIGNAL"],
                 4,
             ),
+
             "histogram": safe_float(
                 row["MACD_HIST"],
                 4,
@@ -872,27 +934,34 @@ def analyze_symbol(
         },
 
         "risk": {
+
             "atr14": safe_float(
                 row["ATR14"],
                 4,
             ),
+
             "atr_pct": safe_float(
                 row["ATR_PCT"],
                 2,
             ),
-            "drawdown_1y_pct": safe_float(
-                row["DRAWDOWN_252"],
-                2,
-            ),
+
+            "drawdown_1y_pct":
+                safe_float(
+                    row["DRAWDOWN_252"],
+                    2,
+                ),
         },
 
         "volume": {
+
             "current": safe_int(
                 row["Volume"]
             ),
+
             "average_20d": safe_int(
                 row["VOL20"]
             ),
+
             "ratio": safe_float(
                 row["VOLUME_RATIO"],
                 2,
@@ -903,28 +972,28 @@ def analyze_symbol(
 
         "warnings": warnings,
 
-        "generated_at_utc": utc_now(),
+        "generated_at_utc":
+            utc_now(),
     }
-
-    return result
 
 
 # ============================================================
-# TÜM EMTİALARI TARA
+# SCANNER
 # ============================================================
 
 def scan_all_assets():
+
     results = []
 
     errors = []
 
-    for symbol in ASSETS.keys():
+    for symbol in ASSETS:
 
         try:
 
             result = analyze_symbol(
-                symbol=symbol,
-                period="10y",
+                symbol,
+                "10y",
             )
 
             results.append(
@@ -940,36 +1009,97 @@ def scan_all_assets():
                 }
             )
 
+    # Highest score first
+
     results = sorted(
         results,
         key=lambda x: x["score"],
         reverse=True,
     )
 
+    # Add overall rank
+
+    for index, item in enumerate(
+        results,
+        start=1,
+    ):
+
+        item["overall_rank"] = index
+
+    metals = [
+        x for x in results
+        if x["group"] == "METALS"
+    ]
+
+    energy = [
+        x for x in results
+        if x["group"] == "ENERGY"
+    ]
+
+    agriculture = [
+        x for x in results
+        if x["group"] == "AGRICULTURE"
+    ]
+
+    broad = [
+        x for x in results
+        if x["group"] == "BROAD_COMMODITY"
+    ]
+
     buy_candidates = [
-        item
-        for item in results
-        if item["signal"] == "AL_ADAYI"
+        x for x in results
+        if x["signal"] == "AL_ADAYI"
     ]
 
     watch_candidates = [
-        item
-        for item in results
-        if item["signal"] == "IZLE"
+        x for x in results
+        if x["signal"] == "IZLE"
+    ]
+
+    wait_candidates = [
+        x for x in results
+        if x["signal"] == "BEKLE"
     ]
 
     return {
+
         "model": MODEL_NAME,
-        "generated_at_utc": utc_now(),
-        "asset_count": len(results),
-        "buy_candidate_count": len(
-            buy_candidates
-        ),
-        "watch_candidate_count": len(
-            watch_candidates
-        ),
-        "results": results,
-        "errors": errors,
+
+        "generated_at_utc":
+            utc_now(),
+
+        "asset_count":
+            len(results),
+
+        "buy_candidate_count":
+            len(buy_candidates),
+
+        "watch_candidate_count":
+            len(watch_candidates),
+
+        "wait_candidate_count":
+            len(wait_candidates),
+
+        "ranking":
+            results,
+
+        "groups": {
+
+            "metals":
+                metals,
+
+            "energy":
+                energy,
+
+            "agriculture":
+                agriculture,
+
+            "broad_commodity_reference":
+                broad,
+        },
+
+        "errors":
+            errors,
     }
 
 
@@ -978,45 +1108,26 @@ def scan_all_assets():
 # ============================================================
 
 def run_backtest(
-    symbol: str,
-    years: int = 10,
-    entry_score: int = 75,
-    exit_score: int = 50,
-    transaction_cost_pct: float = 0.10,
+    symbol,
+    years=10,
+    entry_score=75,
+    exit_score=50,
+    transaction_cost_pct=0.10,
 ):
-    """
-    Basit long-only backtest.
-
-    ÖNEMLİ:
-    Sinyal kapanış verisiyle oluşur.
-    İşlem bir sonraki günün OPEN fiyatından yapılır.
-
-    Böylece aynı kapanış fiyatını kullanarak geleceği görme
-    hatasını azaltmaya çalışıyoruz.
-
-    transaction_cost_pct:
-    Tek yön toplam işlem maliyeti varsayımı.
-    Örnek 0.10 = %0.10.
-    """
 
     symbol = symbol.upper()
 
     if symbol not in ASSETS:
+
         raise ValueError(
-            f"{symbol} V1 ürün listesinde yok."
+            f"{symbol} ürün listesinde yok."
         )
-
-    if years < 2:
-        years = 2
-
-    if years > 20:
-        years = 20
 
     period = f"{years}y"
 
     df = download_history(
-        symbol=symbol,
-        period=period,
+        symbol,
+        period,
     )
 
     df = calculate_indicators(
@@ -1026,12 +1137,13 @@ def run_backtest(
     df = df.dropna().copy()
 
     if len(df) < 250:
+
         raise ValueError(
             "Backtest için yeterli veri yok."
         )
 
-    # Her gün için puan ve sinyal hesapla.
     scores = []
+
     signals = []
 
     for _, row in df.iterrows():
@@ -1040,54 +1152,46 @@ def run_backtest(
             calculate_score(row)
         )
 
-        signal = determine_signal(
-            row,
-            score,
+        signal = (
+            determine_signal(
+                row,
+                score,
+            )
         )
 
-        scores.append(
-            score
-        )
+        scores.append(score)
 
-        signals.append(
-            signal
-        )
+        signals.append(signal)
 
     df["SCORE"] = scores
+
     df["MODEL_SIGNAL"] = signals
 
-    # ========================================================
-    # BACKTEST STATE
-    # ========================================================
+    cost = (
+        transaction_cost_pct
+        /
+        100
+    )
 
     in_position = False
 
     entry_price = None
+
     entry_date = None
+
     entry_score_value = None
 
     trades = []
 
     equity = 1.0
-    equity_curve = []
 
-    cost_fraction = (
-        transaction_cost_pct
-        / 100
-    )
-
-    # Sinyal i gününün kapanışında oluşuyor.
-    # Emir i+1 OPEN'da uygulanıyor.
     for i in range(
-        0,
-        len(df) - 1,
+        len(df) - 1
     ):
 
         current = df.iloc[i]
 
         next_row = df.iloc[i + 1]
-
-        current_date = df.index[i]
 
         next_date = df.index[i + 1]
 
@@ -1103,38 +1207,29 @@ def run_backtest(
             next_row["Open"]
         )
 
-        # ----------------------------------------------------
         # ENTRY
-        # ----------------------------------------------------
 
         if not in_position:
 
-            entry_condition = (
+            if (
                 score >= entry_score
-                and signal == "AL_ADAYI"
-            )
-
-            if entry_condition:
-
-                in_position = True
+                and
+                signal == "AL_ADAYI"
+            ):
 
                 entry_price = (
                     next_open
                     *
-                    (
-                        1
-                        +
-                        cost_fraction
-                    )
+                    (1 + cost)
                 )
 
                 entry_date = next_date
 
                 entry_score_value = score
 
-        # ----------------------------------------------------
+                in_position = True
+
         # EXIT
-        # ----------------------------------------------------
 
         else:
 
@@ -1151,9 +1246,16 @@ def run_backtest(
             )
 
             exit_condition = (
+
                 score <= exit_score
-                or close < ema50
-                or ema50 < ema200
+
+                or
+
+                close < ema50
+
+                or
+
+                ema50 < ema200
             )
 
             if exit_condition:
@@ -1161,14 +1263,10 @@ def run_backtest(
                 exit_price = (
                     next_open
                     *
-                    (
-                        1
-                        -
-                        cost_fraction
-                    )
+                    (1 - cost)
                 )
 
-                gross_return = (
+                trade_return = (
                     (
                         exit_price
                         /
@@ -1177,9 +1275,8 @@ def run_backtest(
                     - 1
                 )
 
-                gross_return_pct = (
-                    gross_return
-                    * 100
+                equity *= (
+                    1 + trade_return
                 )
 
                 holding_days = (
@@ -1188,81 +1285,71 @@ def run_backtest(
                     entry_date
                 ).days
 
-                equity *= (
-                    1
-                    +
-                    gross_return
-                )
-
                 trades.append(
                     {
-                        "entry_date": str(
-                            entry_date.date()
-                        ),
-                        "exit_date": str(
-                            next_date.date()
-                        ),
-                        "entry_price": safe_float(
-                            entry_price,
-                            2,
-                        ),
-                        "exit_price": safe_float(
-                            exit_price,
-                            2,
-                        ),
-                        "entry_score": (
-                            entry_score_value
-                        ),
-                        "exit_score": score,
-                        "return_pct": safe_float(
-                            gross_return_pct,
-                            2,
-                        ),
-                        "holding_days": (
-                            holding_days
-                        ),
+
+                        "entry_date":
+                            str(
+                                entry_date.date()
+                            ),
+
+                        "exit_date":
+                            str(
+                                next_date.date()
+                            ),
+
+                        "entry_price":
+                            safe_float(
+                                entry_price,
+                                2,
+                            ),
+
+                        "exit_price":
+                            safe_float(
+                                exit_price,
+                                2,
+                            ),
+
+                        "entry_score":
+                            entry_score_value,
+
+                        "exit_score":
+                            score,
+
+                        "return_pct":
+                            safe_float(
+                                trade_return
+                                *
+                                100,
+                                2,
+                            ),
+
+                        "holding_days":
+                            holding_days,
                     }
                 )
 
                 in_position = False
+
                 entry_price = None
+
                 entry_date = None
-                entry_score_value = None
 
-        equity_curve.append(
-            {
-                "date": str(
-                    current_date.date()
-                ),
-                "equity": equity,
-            }
-        )
-
-    # ========================================================
-    # AÇIK POZİSYONU TEST SONUNDA KAPAT
-    # ========================================================
+    # Close final open trade
 
     if in_position:
 
-        final_row = df.iloc[-1]
+        final = df.iloc[-1]
 
         final_date = df.index[-1]
 
-        final_close = float(
-            final_row["Close"]
-        )
-
         exit_price = (
-            final_close
+            float(final["Close"])
             *
-            (
-                1
-                -
-                cost_fraction
-            )
+            (1 - cost)
         )
 
-        gross_return = (
+        trade_return = (
             (
                 exit_price
                 /
@@ -1271,83 +1358,85 @@ def run_backtest(
             - 1
         )
 
-        gross_return_pct = (
-            gross_return
-            * 100
-        )
-
-        holding_days = (
-            final_date
-            -
-            entry_date
-        ).days
-
         equity *= (
-            1
-            +
-            gross_return
+            1 + trade_return
         )
 
         trades.append(
             {
-                "entry_date": str(
-                    entry_date.date()
-                ),
-                "exit_date": str(
-                    final_date.date()
-                ),
-                "entry_price": safe_float(
-                    entry_price,
-                    2,
-                ),
-                "exit_price": safe_float(
-                    exit_price,
-                    2,
-                ),
-                "entry_score": (
-                    entry_score_value
-                ),
-                "exit_score": safe_int(
-                    final_row["SCORE"]
-                ),
-                "return_pct": safe_float(
-                    gross_return_pct,
-                    2,
-                ),
-                "holding_days": (
-                    holding_days
-                ),
-                "forced_exit_at_test_end": True,
+
+                "entry_date":
+                    str(
+                        entry_date.date()
+                    ),
+
+                "exit_date":
+                    str(
+                        final_date.date()
+                    ),
+
+                "entry_price":
+                    safe_float(
+                        entry_price,
+                        2,
+                    ),
+
+                "exit_price":
+                    safe_float(
+                        exit_price,
+                        2,
+                    ),
+
+                "entry_score":
+                    entry_score_value,
+
+                "exit_score":
+                    safe_int(
+                        final["SCORE"]
+                    ),
+
+                "return_pct":
+                    safe_float(
+                        trade_return * 100,
+                        2,
+                    ),
+
+                "holding_days":
+                    (
+                        final_date
+                        -
+                        entry_date
+                    ).days,
+
+                "forced_exit_at_test_end":
+                    True,
             }
         )
 
-    # ========================================================
-    # İSTATİSTİKLER
-    # ========================================================
-
     returns = [
-        trade["return_pct"]
-        for trade in trades
-        if trade["return_pct"] is not None
+
+        x["return_pct"]
+
+        for x in trades
+
+        if x["return_pct"] is not None
     ]
 
     winners = [
-        value
-        for value in returns
-        if value > 0
+        x for x in returns
+        if x > 0
     ]
 
     losers = [
-        value
-        for value in returns
-        if value <= 0
+        x for x in returns
+        if x <= 0
     ]
 
     trade_count = len(
         trades
     )
 
-    if trade_count > 0:
+    if trade_count:
 
         win_rate = (
             len(winners)
@@ -1357,34 +1446,29 @@ def run_backtest(
             100
         )
 
-        avg_trade = float(
-            np.mean(
-                returns
-            )
+        avg_trade = np.mean(
+            returns
         )
 
-        median_trade = float(
-            np.median(
-                returns
-            )
+        median_trade = np.median(
+            returns
         )
 
-        avg_holding = float(
-            np.mean(
-                [
-                    trade[
-                        "holding_days"
-                    ]
-                    for trade in trades
-                ]
-            )
+        avg_holding = np.mean(
+            [
+                x["holding_days"]
+                for x in trades
+            ]
         )
 
     else:
 
         win_rate = 0
+
         avg_trade = 0
+
         median_trade = 0
+
         avg_holding = 0
 
     gross_profit = sum(
@@ -1392,29 +1476,28 @@ def run_backtest(
     )
 
     gross_loss = abs(
-        sum(
-            losers
-        )
+        sum(losers)
     )
 
     if gross_loss > 0:
+
         profit_factor = (
             gross_profit
             /
             gross_loss
         )
+
     elif gross_profit > 0:
+
         profit_factor = None
+
     else:
+
         profit_factor = 0
 
-    strategy_return_pct = (
+    total_return = (
         equity - 1
     ) * 100
-
-    # --------------------------------------------------------
-    # BUY & HOLD
-    # --------------------------------------------------------
 
     first_open = float(
         df.iloc[0]["Open"]
@@ -1424,7 +1507,7 @@ def run_backtest(
         df.iloc[-1]["Close"]
     )
 
-    buy_hold_return_pct = (
+    buy_hold_return = (
         (
             last_close
             /
@@ -1433,33 +1516,26 @@ def run_backtest(
         - 1
     ) * 100
 
-    # --------------------------------------------------------
-    # MAX DRAWDOWN
-    #
-    # Burada trade-level equity üzerinden kaba ilk ölçüm.
-    # V2'de günlük mark-to-market equity curve kullanacağız.
-    # --------------------------------------------------------
+    # Trade-level drawdown
 
     running_equity = 1.0
 
-    peak_equity = 1.0
+    peak = 1.0
 
-    max_drawdown = 0.0
+    max_drawdown = 0
 
     for trade in trades:
 
-        r = (
+        running_equity *= (
+            1
+            +
             trade["return_pct"]
             /
             100
         )
 
-        running_equity *= (
-            1 + r
-        )
-
-        peak_equity = max(
-            peak_equity,
+        peak = max(
+            peak,
             running_equity,
         )
 
@@ -1467,7 +1543,7 @@ def run_backtest(
             (
                 running_equity
                 /
-                peak_equity
+                peak
             )
             - 1
         ) * 100
@@ -1477,22 +1553,16 @@ def run_backtest(
             drawdown,
         )
 
-    # --------------------------------------------------------
-    # CAGR
-    # --------------------------------------------------------
-
     start_date = df.index[0]
 
     end_date = df.index[-1]
 
-    elapsed_days = (
-        end_date
-        -
-        start_date
-    ).days
-
     elapsed_years = (
-        elapsed_days
+        (
+            end_date
+            -
+            start_date
+        ).days
         /
         365.25
     )
@@ -1503,155 +1573,246 @@ def run_backtest(
     ):
 
         cagr = (
+            equity
+            **
             (
-                equity
-                **
-                (
-                    1
-                    /
-                    elapsed_years
-                )
+                1
+                /
+                elapsed_years
             )
             - 1
         ) * 100
 
     else:
+
         cagr = None
 
     return {
-        "model": MODEL_NAME,
-        "symbol": symbol,
-        "name": ASSETS[
-            symbol
-        ]["name"],
+
+        "model":
+            MODEL_NAME,
+
+        "symbol":
+            symbol,
+
+        "commodity":
+            ASSETS[symbol][
+                "tr_name"
+            ],
+
+        "group":
+            ASSETS[symbol][
+                "group"
+            ],
 
         "test_period": {
-            "start": str(
-                start_date.date()
-            ),
-            "end": str(
-                end_date.date()
-            ),
-            "years_requested": years,
+
+            "start":
+                str(
+                    start_date.date()
+                ),
+
+            "end":
+                str(
+                    end_date.date()
+                ),
+
+            "years_requested":
+                years,
         },
 
         "settings": {
-            "entry_score": entry_score,
-            "exit_score": exit_score,
-            "transaction_cost_pct_each_side": (
-                transaction_cost_pct
-            ),
-            "execution": (
-                "Signal at close, "
-                "execution at next trading day open"
-            ),
-            "long_only": True,
-            "short": False,
-            "leverage": False,
+
+            "entry_score":
+                entry_score,
+
+            "exit_score":
+                exit_score,
+
+            "transaction_cost_pct_each_side":
+                transaction_cost_pct,
+
+            "execution":
+                "Signal at close, next trading day open",
+
+            "long_only":
+                True,
+
+            "short":
+                False,
+
+            "leverage":
+                False,
         },
 
         "performance": {
-            "trade_count": trade_count,
-            "win_rate_pct": safe_float(
-                win_rate,
-                2,
-            ),
-            "average_trade_pct": safe_float(
-                avg_trade,
-                2,
-            ),
-            "median_trade_pct": safe_float(
-                median_trade,
-                2,
-            ),
-            "average_holding_days": safe_float(
-                avg_holding,
-                1,
-            ),
-            "profit_factor": safe_float(
-                profit_factor,
-                3,
-            ),
-            "strategy_total_return_pct": safe_float(
-                strategy_return_pct,
-                2,
-            ),
-            "strategy_cagr_pct": safe_float(
-                cagr,
-                2,
-            ),
-            "max_drawdown_trade_level_pct": safe_float(
-                max_drawdown,
-                2,
-            ),
-            "buy_hold_return_pct": safe_float(
-                buy_hold_return_pct,
-                2,
-            ),
+
+            "trade_count":
+                trade_count,
+
+            "win_rate_pct":
+                safe_float(
+                    win_rate,
+                    2,
+                ),
+
+            "average_trade_pct":
+                safe_float(
+                    avg_trade,
+                    2,
+                ),
+
+            "median_trade_pct":
+                safe_float(
+                    median_trade,
+                    2,
+                ),
+
+            "average_holding_days":
+                safe_float(
+                    avg_holding,
+                    1,
+                ),
+
+            "profit_factor":
+                safe_float(
+                    profit_factor,
+                    3,
+                ),
+
+            "strategy_total_return_pct":
+                safe_float(
+                    total_return,
+                    2,
+                ),
+
+            "strategy_cagr_pct":
+                safe_float(
+                    cagr,
+                    2,
+                ),
+
+            "max_drawdown_trade_level_pct":
+                safe_float(
+                    max_drawdown,
+                    2,
+                ),
+
+            "buy_hold_return_pct":
+                safe_float(
+                    buy_hold_return,
+                    2,
+                ),
         },
 
-        "trades": trades,
+        "trades":
+            trades,
 
-        "generated_at_utc": utc_now(),
+        "generated_at_utc":
+            utc_now(),
     }
 
 
 # ============================================================
-# API
+# API ENDPOINTS
 # ============================================================
 
 @app.get("/")
 def root():
+
     return {
-        "status": "online",
-        "project": "Commodity Rotation Bot",
-        "model": MODEL_NAME,
-        "mode": "LONG_ONLY_MANUAL_EXECUTION",
-        "tracked_assets": list(
-            ASSETS.keys()
-        ),
-        "endpoints": {
-            "health": "/health",
-            "assets": "/assets",
-            "analyze_example": "/analyze/GLD",
-            "scan": "/scan",
-            "backtest_example": (
-                "/backtest/GLD?years=10"
+
+        "status":
+            "online",
+
+        "project":
+            "Commodity Rotation Bot",
+
+        "model":
+            MODEL_NAME,
+
+        "mode":
+            "LONG_ONLY_MANUAL_EXECUTION",
+
+        "asset_count":
+            len(ASSETS),
+
+        "tracked_assets":
+            list(
+                ASSETS.keys()
             ),
-            "dashboard": "/dashboard",
+
+        "endpoints": {
+
+            "health":
+                "/health",
+
+            "assets":
+                "/assets",
+
+            "scan":
+                "/scan",
+
+            "analyze_gold":
+                "/analyze/GLD",
+
+            "analyze_copper":
+                "/analyze/CPER",
+
+            "backtest_gold":
+                "/backtest/GLD?years=10",
+
+            "backtest_copper":
+                "/backtest/CPER?years=10",
+
+            "dashboard":
+                "/dashboard",
         },
     }
 
 
 @app.get("/health")
 def health():
+
     return {
-        "status": "ok",
-        "model": MODEL_NAME,
-        "time_utc": utc_now(),
+
+        "status":
+            "ok",
+
+        "model":
+            MODEL_NAME,
+
+        "asset_count":
+            len(ASSETS),
+
+        "time_utc":
+            utc_now(),
     }
 
 
 @app.get("/assets")
 def assets():
+
     return {
-        "model": MODEL_NAME,
-        "count": len(
-            ASSETS
-        ),
-        "assets": ASSETS,
+
+        "model":
+            MODEL_NAME,
+
+        "count":
+            len(ASSETS),
+
+        "assets":
+            ASSETS,
     }
 
 
 @app.get("/analyze/{symbol}")
-def analyze(
-    symbol: str,
-):
+def analyze(symbol: str):
+
     try:
 
         return analyze_symbol(
-            symbol=symbol,
-            period="10y",
+            symbol
         )
 
     except Exception as exc:
@@ -1664,61 +1825,51 @@ def analyze(
 
 @app.get("/scan")
 def scan():
-    try:
 
-        return scan_all_assets()
-
-    except Exception as exc:
-
-        raise HTTPException(
-            status_code=500,
-            detail=str(exc),
-        )
+    return scan_all_assets()
 
 
 @app.get("/backtest/{symbol}")
 def backtest(
+
     symbol: str,
 
     years: int = Query(
-        default=10,
+        10,
         ge=2,
         le=20,
     ),
 
     entry_score: int = Query(
-        default=75,
+        75,
         ge=50,
         le=100,
     ),
 
     exit_score: int = Query(
-        default=50,
+        50,
         ge=0,
         le=80,
     ),
 
     transaction_cost_pct: float = Query(
-        default=0.10,
+        0.10,
         ge=0,
         le=2,
     ),
 ):
+
     try:
 
         return run_backtest(
-            symbol=symbol,
-            years=years,
-            entry_score=entry_score,
-            exit_score=exit_score,
-            transaction_cost_pct=(
-                transaction_cost_pct
-            ),
+            symbol,
+            years,
+            entry_score,
+            exit_score,
+            transaction_cost_pct,
         )
 
     except Exception as exc:
-
-        traceback.print_exc()
 
         raise HTTPException(
             status_code=400,
@@ -1727,7 +1878,7 @@ def backtest(
 
 
 # ============================================================
-# BASİT DASHBOARD
+# DASHBOARD
 # ============================================================
 
 @app.get(
@@ -1737,173 +1888,202 @@ def backtest(
 def dashboard():
 
     html = """
+
     <!DOCTYPE html>
+
     <html>
+
     <head>
-        <title>Commodity Rotation Bot</title>
 
-        <meta charset="UTF-8">
+    <meta charset="UTF-8">
 
-        <style>
+    <title>
+    Commodity Rotation Bot
+    </title>
 
-            body {
-                font-family: Arial, sans-serif;
-                max-width: 1100px;
-                margin: 40px auto;
-                padding: 20px;
-                background: #f5f5f5;
-            }
+    <style>
 
-            h1 {
-                margin-bottom: 5px;
-            }
+    body {
 
-            .subtitle {
-                color: #666;
-                margin-bottom: 30px;
-            }
+        font-family:
+        Arial,
+        sans-serif;
 
-            .warning {
-                background: #fff3cd;
-                padding: 15px;
-                border-radius: 8px;
-                margin-bottom: 25px;
-            }
+        max-width:
+        1100px;
 
-            .links {
-                background: white;
-                padding: 20px;
-                border-radius: 10px;
-                margin-bottom: 25px;
-            }
+        margin:
+        40px auto;
 
-            a {
-                display: block;
-                margin: 10px 0;
-                font-size: 18px;
-            }
+        padding:
+        20px;
 
-            code {
-                background: #eee;
-                padding: 3px 6px;
-                border-radius: 4px;
-            }
+        background:
+        #f4f4f4;
+    }
 
-        </style>
+    .card {
+
+        background:
+        white;
+
+        padding:
+        20px;
+
+        margin-bottom:
+        20px;
+
+        border-radius:
+        10px;
+    }
+
+    a {
+
+        display:
+        block;
+
+        margin:
+        8px 0;
+
+        font-size:
+        17px;
+    }
+
+    </style>
 
     </head>
 
     <body>
 
-        <h1>
-            Commodity Rotation Bot v1.0
-        </h1>
+    <h1>
+    Commodity Rotation Bot v1.1
+    </h1>
 
-        <div class="subtitle">
-            Long-only commodity ETF signal system
-        </div>
+    <p>
+    Long-only commodity ETF/ETP scanner
+    </p>
 
-        <div class="warning">
+    <div class="card">
 
-            Bu sistem otomatik işlem yapmaz.
+    <h2>
+    METALLER
+    </h2>
 
-            <br><br>
+    <a href="/analyze/GLD">
+    Altın - GLD
+    </a>
 
-            Short, futures veya kaldıraç kullanmaz.
+    <a href="/analyze/SLV">
+    Gümüş - SLV
+    </a>
 
-            <br><br>
+    <a href="/analyze/CPER">
+    Bakır - CPER
+    </a>
 
-            İlk amaç:
-            algoritmayı tarihsel ve forward veride test etmektir.
+    </div>
 
-        </div>
 
-        <div class="links">
+    <div class="card">
 
-            <h2>Endpoints</h2>
+    <h2>
+    ENERJİ
+    </h2>
 
-            <a href="/health">
-                Health Check
-            </a>
+    <a href="/analyze/USO">
+    Petrol - USO
+    </a>
 
-            <a href="/assets">
-                Takip Edilen Ürünler
-            </a>
+    <a href="/analyze/UNG">
+    Doğal Gaz - UNG
+    </a>
 
-            <a href="/analyze/GLD">
-                GLD Analizi
-            </a>
+    </div>
 
-            <a href="/analyze/SLV">
-                SLV Analizi
-            </a>
 
-            <a href="/analyze/USO">
-                USO Analizi
-            </a>
+    <div class="card">
 
-            <a href="/analyze/DBC">
-                DBC Analizi
-            </a>
+    <h2>
+    TARIM
+    </h2>
 
-            <a href="/scan">
-                Tümünü Tara
-            </a>
+    <a href="/analyze/DBA">
+    Tarım Sepeti - DBA
+    </a>
 
-            <a href="/backtest/GLD?years=10">
-                GLD 10 Yıllık Backtest
-            </a>
+    <a href="/analyze/WEAT">
+    Buğday - WEAT
+    </a>
 
-            <a href="/backtest/SLV?years=10">
-                SLV 10 Yıllık Backtest
-            </a>
+    <a href="/analyze/CORN">
+    Mısır - CORN
+    </a>
 
-            <a href="/backtest/USO?years=10">
-                USO 10 Yıllık Backtest
-            </a>
+    <a href="/analyze/SOYB">
+    Soya - SOYB
+    </a>
 
-            <a href="/backtest/DBC?years=10">
-                DBC 10 Yıllık Backtest
-            </a>
+    </div>
 
-        </div>
 
-        <div class="links">
+    <div class="card">
 
-            <h2>Model</h2>
+    <h2>
+    GENEL
+    </h2>
 
-            <p>
-                <strong>
-                    COMMODITY-ROTATION-V1
-                </strong>
-            </p>
+    <a href="/analyze/DBC">
+    Geniş Emtia Sepeti - DBC
+    </a>
 
-            <p>
-                Trend:
-                EMA20 / EMA50 / EMA200
-            </p>
+    </div>
 
-            <p>
-                Momentum:
-                20 / 60 / 120 gün
-            </p>
 
-            <p>
-                Ek göstergeler:
-                RSI14, MACD, ATR
-            </p>
+    <div class="card">
 
-            <p>
-                Sinyaller:
-                <code>AL_ADAYI</code>,
-                <code>IZLE</code>,
-                <code>BEKLE</code>
-            </p>
+    <h2>
+    TARAMA
+    </h2>
 
-        </div>
+    <a href="/scan">
+    Tüm Emtiaları Tara
+    </a>
+
+    </div>
+
+
+    <div class="card">
+
+    <h2>
+    BACKTEST
+    </h2>
+
+    <a href="/backtest/GLD?years=10">
+    Altın 10 yıl
+    </a>
+
+    <a href="/backtest/CPER?years=10">
+    Bakır 10 yıl
+    </a>
+
+    <a href="/backtest/USO?years=10">
+    Petrol 10 yıl
+    </a>
+
+    <a href="/backtest/UNG?years=10">
+    Doğal Gaz 10 yıl
+    </a>
+
+    <a href="/backtest/DBA?years=10">
+    Tarım Sepeti 10 yıl
+    </a>
+
+    </div>
 
     </body>
+
     </html>
+
     """
 
     return HTMLResponse(
