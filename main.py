@@ -5912,3 +5912,2487 @@ def v13_compare_endpoint(
             status_code=500,
             detail=str(exc),
         )
+
+# ============================================================
+# V1.4 EXPERIMENT
+# GLOBAL BREADTH REGIME FILTER
+#
+# FROZEN BASE:
+#   V1.3 CONFIRM3
+#
+# ONLY NEW EXPERIMENTAL CHANGE:
+#   New entries are allowed only when:
+#       at least 5 of 10 assets have Close > EMA200
+#
+# IMPORTANT:
+# - Existing holdings are NOT affected by breadth
+# - Existing holdings exit only with V1.2A slow exit
+# - CONFIRM3 remains unchanged
+# - Entry score remains 75
+# - Exit score remains 50
+# - Ranking remains SCORE, MOM120, MOM60, MOM20
+# - No asset exclusions
+# - No optimization
+# - Long only
+# - No leverage
+# - No automatic orders
+# ============================================================
+
+
+V14_MODEL_NAME = "COMMODITY-ROTATION-V1.4-EXPERIMENT-BREADTH5"
+V14_CONFIRMATION_DAYS = 3
+V14_BREADTH_MIN = 5
+
+
+# ============================================================
+# HELPER
+# BASE AL_ADAYI CHECK
+# ============================================================
+
+def v14_is_al_adayi(
+    prepared,
+    symbol,
+    signal_date,
+    entry_score=75,
+):
+    if symbol not in prepared:
+        return False
+
+    df = prepared[symbol]
+
+    if signal_date not in df.index:
+        return False
+
+    row = df.loc[signal_date]
+
+    try:
+        score = int(row["SCORE"])
+        signal = str(row["MODEL_SIGNAL"])
+    except Exception:
+        return False
+
+    return (
+        score >= entry_score
+        and
+        signal == "AL_ADAYI"
+    )
+
+
+# ============================================================
+# HELPER
+# CONFIRM3
+#
+# Candidate must be AL_ADAYI on the current close
+# AND previous 2 consecutive trading closes.
+# ============================================================
+
+def v14_confirmed_al_adayi(
+    prepared,
+    symbol,
+    signal_date,
+    entry_score=75,
+    confirmation_days=3,
+):
+    if symbol not in prepared:
+        return False
+
+    df = prepared[symbol]
+
+    if signal_date not in df.index:
+        return False
+
+    try:
+        pos = df.index.get_loc(signal_date)
+    except Exception:
+        return False
+
+    # Defensive handling in case index lookup returns slice/array
+    if not isinstance(pos, (int, np.integer)):
+        try:
+            pos = int(np.where(df.index == signal_date)[0][-1])
+        except Exception:
+            return False
+
+    if pos < confirmation_days - 1:
+        return False
+
+    dates_to_check = df.index[
+        pos - confirmation_days + 1:
+        pos + 1
+    ]
+
+    if len(dates_to_check) != confirmation_days:
+        return False
+
+    for dt in dates_to_check:
+
+        if not v14_is_al_adayi(
+            prepared=prepared,
+            symbol=symbol,
+            signal_date=dt,
+            entry_score=entry_score,
+        ):
+            return False
+
+    return True
+
+
+# ============================================================
+# GLOBAL BREADTH
+#
+# Breadth = number of assets with Close > EMA200
+#
+# IMPORTANT:
+# This is calculated across the whole frozen universe.
+# It is NOT asset-specific.
+# ============================================================
+
+def v14_market_breadth(
+    prepared,
+    signal_date,
+):
+    above_ema200 = 0
+    available = 0
+    details = {}
+
+    for symbol, df in prepared.items():
+
+        if signal_date not in df.index:
+            continue
+
+        row = df.loc[signal_date]
+
+        try:
+            close = float(row["Close"])
+            ema200 = float(row["EMA200"])
+        except Exception:
+            continue
+
+        if (
+            np.isnan(close)
+            or
+            np.isnan(ema200)
+        ):
+            continue
+
+        available += 1
+
+        is_above = (
+            close > ema200
+        )
+
+        if is_above:
+            above_ema200 += 1
+
+        details[symbol] = {
+            "close": safe_float(close, 4),
+            "ema200": safe_float(ema200, 4),
+            "above_ema200": bool(is_above),
+        }
+
+    return {
+        "above_ema200": above_ema200,
+        "available_assets": available,
+        "total_universe": len(ASSETS),
+        "breadth_pct_of_available": safe_float(
+            (
+                above_ema200
+                /
+                available
+                *
+                100
+            )
+            if available
+            else 0,
+            2,
+        ),
+        "details": details,
+    }
+
+
+# ============================================================
+# V1.3 BASELINE CANDIDATES
+#
+# CONFIRM3 only.
+# No breadth filter.
+#
+# Used here so v1.3 and v1.4 are compared with exactly
+# the same portfolio engine and same data window.
+# ============================================================
+
+def v13_baseline_candidates(
+    prepared,
+    signal_date,
+    entry_score=75,
+):
+    candidates = []
+
+    for symbol, df in prepared.items():
+
+        if signal_date not in df.index:
+            continue
+
+        if not v14_confirmed_al_adayi(
+            prepared=prepared,
+            symbol=symbol,
+            signal_date=signal_date,
+            entry_score=entry_score,
+            confirmation_days=V14_CONFIRMATION_DAYS,
+        ):
+            continue
+
+        row = df.loc[signal_date]
+
+        candidates.append({
+            "symbol": symbol,
+            "score": int(row["SCORE"]),
+            "mom120": float(row["MOM120"]),
+            "mom60": float(row["MOM60"]),
+            "mom20": float(row["MOM20"]),
+        })
+
+    candidates.sort(
+        key=lambda x: (
+            x["score"],
+            x["mom120"],
+            x["mom60"],
+            x["mom20"],
+        ),
+        reverse=True,
+    )
+
+    return candidates
+
+
+# ============================================================
+# V1.4 CANDIDATES
+#
+# CONFIRM3
+# +
+# GLOBAL BREADTH >= 5
+# ============================================================
+
+def v14_candidates(
+    prepared,
+    signal_date,
+    entry_score=75,
+    breadth_min=5,
+):
+    breadth = v14_market_breadth(
+        prepared,
+        signal_date,
+    )
+
+    # --------------------------------------------------------
+    # GLOBAL REGIME GATE
+    # --------------------------------------------------------
+
+    if (
+        breadth["above_ema200"]
+        <
+        breadth_min
+    ):
+        return [], breadth
+
+    candidates = []
+
+    for symbol, df in prepared.items():
+
+        if signal_date not in df.index:
+            continue
+
+        # ----------------------------------------------------
+        # V1.3 CONFIRM3
+        # ----------------------------------------------------
+
+        if not v14_confirmed_al_adayi(
+            prepared=prepared,
+            symbol=symbol,
+            signal_date=signal_date,
+            entry_score=entry_score,
+            confirmation_days=V14_CONFIRMATION_DAYS,
+        ):
+            continue
+
+        row = df.loc[signal_date]
+
+        candidates.append({
+            "symbol": symbol,
+            "score": int(row["SCORE"]),
+            "mom120": float(row["MOM120"]),
+            "mom60": float(row["MOM60"]),
+            "mom20": float(row["MOM20"]),
+        })
+
+    candidates.sort(
+        key=lambda x: (
+            x["score"],
+            x["mom120"],
+            x["mom60"],
+            x["mom20"],
+        ),
+        reverse=True,
+    )
+
+    return candidates, breadth
+
+
+# ============================================================
+# GENERIC V1.3 / V1.4 TOP-N STICKY ENGINE
+#
+# mode:
+#   "V13" = CONFIRM3
+#   "V14" = CONFIRM3 + BREADTH >= 5
+#
+# Existing holdings:
+#   NEVER sold because breadth falls below 5.
+#   NEVER sold because another candidate ranks higher.
+#
+# They exit ONLY via frozen V1.2A slow exit.
+# ============================================================
+
+def run_v14_rotation_variant(
+    prepared,
+    common_dates,
+    top_n=2,
+    entry_score=75,
+    exit_score=50,
+    transaction_cost_pct=0.10,
+    mode="V14",
+    breadth_min=5,
+):
+    if len(common_dates) < 2:
+        raise ValueError(
+            "Rotation backtest için yeterli tarih yok."
+        )
+
+    cost = (
+        transaction_cost_pct
+        /
+        100
+    )
+
+    equity = 1.0
+    peak = 1.0
+    max_drawdown = 0.0
+
+    holdings = {}
+
+    trades = []
+    rebalances = []
+    equity_curve = []
+
+    cash_days = 0
+    invested_days = 0
+
+    rotation_count = 0
+    entry_count = 0
+    exit_count = 0
+
+    blocked_entry_days = 0
+    breadth_pass_days = 0
+    breadth_fail_days = 0
+
+    for i in range(
+        len(common_dates) - 1
+    ):
+        signal_date = common_dates[i]
+        next_date = common_dates[i + 1]
+
+        # ====================================================
+        # 1. MARK TO MARKET
+        # OPEN -> NEXT OPEN
+        # ====================================================
+
+        if holdings:
+
+            weight = (
+                1.0
+                /
+                top_n
+            )
+
+            daily_return = 0.0
+
+            for symbol in holdings:
+
+                df = prepared[symbol]
+
+                current_open = float(
+                    df.loc[
+                        signal_date,
+                        "Open",
+                    ]
+                )
+
+                next_open = float(
+                    df.loc[
+                        next_date,
+                        "Open",
+                    ]
+                )
+
+                if current_open > 0:
+
+                    daily_return += (
+                        (
+                            next_open
+                            /
+                            current_open
+                            -
+                            1
+                        )
+                        *
+                        weight
+                    )
+
+            equity *= (
+                1
+                +
+                daily_return
+            )
+
+        # ====================================================
+        # 2. EXIT CHECK
+        # FROZEN V1.2A
+        # ====================================================
+
+        old_symbols = list(
+            holdings.keys()
+        )
+
+        exiting = []
+
+        for symbol in old_symbols:
+
+            row = (
+                prepared[symbol]
+                .loc[signal_date]
+            )
+
+            if rotation_exit_required(
+                row,
+                exit_score,
+            ):
+                exiting.append(
+                    symbol
+                )
+
+        survivors = [
+            symbol
+            for symbol in old_symbols
+            if symbol not in exiting
+        ]
+
+        # ====================================================
+        # 3. DETERMINE EMPTY SLOTS
+        # ====================================================
+
+        next_symbols = list(
+            survivors
+        )
+
+        free_slots = max(
+            0,
+            top_n
+            -
+            len(next_symbols),
+        )
+
+        entering = []
+
+        breadth = v14_market_breadth(
+            prepared,
+            signal_date,
+        )
+
+        # ====================================================
+        # 4. NEW ENTRY LOGIC
+        #
+        # IMPORTANT:
+        # breadth only controls EMPTY SLOT filling.
+        # It does NOT touch survivors.
+        # ====================================================
+
+        if free_slots > 0:
+
+            if mode == "V13":
+
+                candidates = (
+                    v13_baseline_candidates(
+                        prepared=prepared,
+                        signal_date=signal_date,
+                        entry_score=entry_score,
+                    )
+                )
+
+            else:
+
+                candidates, breadth = (
+                    v14_candidates(
+                        prepared=prepared,
+                        signal_date=signal_date,
+                        entry_score=entry_score,
+                        breadth_min=breadth_min,
+                    )
+                )
+
+            candidate_symbols = [
+                x["symbol"]
+                for x in candidates
+            ]
+
+            # -----------------------------------------------
+            # Diagnostic counters
+            # -----------------------------------------------
+
+            if mode == "V14":
+
+                if (
+                    breadth["above_ema200"]
+                    >=
+                    breadth_min
+                ):
+                    breadth_pass_days += 1
+
+                else:
+                    breadth_fail_days += 1
+
+                    # Was there actually a CONFIRM3 candidate
+                    # that would have entered under v1.3?
+                    baseline_candidates = (
+                        v13_baseline_candidates(
+                            prepared=prepared,
+                            signal_date=signal_date,
+                            entry_score=entry_score,
+                        )
+                    )
+
+                    baseline_available = [
+                        x
+                        for x in baseline_candidates
+                        if x["symbol"] not in next_symbols
+                    ]
+
+                    if baseline_available:
+                        blocked_entry_days += 1
+
+            # -----------------------------------------------
+            # Sticky fill
+            # -----------------------------------------------
+
+            for symbol in candidate_symbols:
+
+                if symbol in next_symbols:
+                    continue
+
+                entering.append(
+                    symbol
+                )
+
+                next_symbols.append(
+                    symbol
+                )
+
+                if (
+                    len(entering)
+                    >=
+                    free_slots
+                ):
+                    break
+
+        # ====================================================
+        # 5. TRANSACTION COST
+        # ====================================================
+
+        sides = (
+            len(exiting)
+            +
+            len(entering)
+        )
+
+        if sides:
+
+            equity *= (
+                1
+                -
+                cost
+                *
+                sides
+                /
+                top_n
+            )
+
+        # ====================================================
+        # 6. CLOSE EXITING TRADES
+        # ====================================================
+
+        for symbol in exiting:
+
+            old = holdings[symbol]
+
+            entry_date = (
+                old["entry_date"]
+            )
+
+            entry_open = float(
+                prepared[symbol]
+                .loc[
+                    entry_date,
+                    "Open",
+                ]
+            )
+
+            exit_open = float(
+                prepared[symbol]
+                .loc[
+                    next_date,
+                    "Open",
+                ]
+            )
+
+            gross = (
+                exit_open
+                /
+                entry_open
+                -
+                1
+            )
+
+            net = (
+                (1 + gross)
+                *
+                (1 - cost)
+                *
+                (1 - cost)
+                -
+                1
+            )
+
+            trades.append({
+                "symbol":
+                    symbol,
+
+                "entry_date":
+                    str(
+                        entry_date.date()
+                    ),
+
+                "exit_date":
+                    str(
+                        next_date.date()
+                    ),
+
+                "entry_score":
+                    old["entry_score"],
+
+                "exit_score":
+                    safe_int(
+                        prepared[symbol]
+                        .loc[
+                            signal_date,
+                            "SCORE",
+                        ]
+                    ),
+
+                "return_pct":
+                    safe_float(
+                        net * 100,
+                        2,
+                    ),
+
+                "holding_days":
+                    (
+                        next_date
+                        -
+                        entry_date
+                    ).days,
+
+                "exit_reason":
+                    "V1.2A_SLOW_EXIT",
+
+                "entry_breadth":
+                    old.get(
+                        "entry_breadth"
+                    ),
+            })
+
+            exit_count += 1
+
+        # ====================================================
+        # 7. BUILD NEXT HOLDINGS
+        # ====================================================
+
+        new_holdings = {}
+
+        for symbol in survivors:
+
+            new_holdings[symbol] = (
+                holdings[symbol]
+            )
+
+        for symbol in entering:
+
+            score = int(
+                prepared[symbol]
+                .loc[
+                    signal_date,
+                    "SCORE",
+                ]
+            )
+
+            new_holdings[symbol] = {
+                "entry_date":
+                    next_date,
+
+                "entry_score":
+                    score,
+
+                "entry_breadth":
+                    breadth[
+                        "above_ema200"
+                    ],
+            }
+
+            entry_count += 1
+
+        if (
+            exiting
+            and
+            entering
+        ):
+            rotation_count += 1
+
+        # ====================================================
+        # 8. REBALANCE LOG
+        # ====================================================
+
+        if sides:
+
+            rebalances.append({
+                "signal_date":
+                    str(
+                        signal_date.date()
+                    ),
+
+                "execution_date":
+                    str(
+                        next_date.date()
+                    ),
+
+                "from":
+                    (
+                        old_symbols
+                        if old_symbols
+                        else ["CASH"]
+                    ),
+
+                "to":
+                    (
+                        next_symbols
+                        if next_symbols
+                        else ["CASH"]
+                    ),
+
+                "exiting":
+                    exiting,
+
+                "entering":
+                    entering,
+
+                "survivors":
+                    survivors,
+
+                "transaction_sides":
+                    sides,
+
+                "breadth_above_ema200":
+                    breadth[
+                        "above_ema200"
+                    ],
+
+                "breadth_available":
+                    breadth[
+                        "available_assets"
+                    ],
+
+                "breadth_gate":
+                    (
+                        "PASS"
+                        if (
+                            breadth[
+                                "above_ema200"
+                            ]
+                            >=
+                            breadth_min
+                        )
+                        else
+                        "BLOCK"
+                    ),
+            })
+
+        holdings = new_holdings
+
+        # ====================================================
+        # 9. CASH / INVESTED
+        # ====================================================
+
+        if holdings:
+            invested_days += 1
+        else:
+            cash_days += 1
+
+        # ====================================================
+        # 10. DAILY DRAWDOWN
+        # ====================================================
+
+        peak = max(
+            peak,
+            equity,
+        )
+
+        drawdown = (
+            equity
+            /
+            peak
+            -
+            1
+        ) * 100
+
+        max_drawdown = min(
+            max_drawdown,
+            drawdown,
+        )
+
+        equity_curve.append({
+            "date":
+                str(
+                    next_date.date()
+                ),
+
+            "equity":
+                safe_float(
+                    equity,
+                    6,
+                ),
+
+            "drawdown_pct":
+                safe_float(
+                    drawdown,
+                    2,
+                ),
+
+            "holdings":
+                (
+                    list(
+                        holdings.keys()
+                    )
+                    if holdings
+                    else ["CASH"]
+                ),
+
+            "breadth_above_ema200":
+                breadth[
+                    "above_ema200"
+                ],
+        })
+
+    # ========================================================
+    # 11. FORCED FINAL CLOSE
+    # ========================================================
+
+    final_date = common_dates[-1]
+
+    if holdings:
+
+        weight = (
+            1.0
+            /
+            top_n
+        )
+
+        final_day_return = 0.0
+
+        for symbol in holdings:
+
+            df = prepared[symbol]
+
+            final_open = float(
+                df.loc[
+                    final_date,
+                    "Open",
+                ]
+            )
+
+            final_close = float(
+                df.loc[
+                    final_date,
+                    "Close",
+                ]
+            )
+
+            if final_open > 0:
+
+                final_day_return += (
+                    (
+                        final_close
+                        /
+                        final_open
+                        -
+                        1
+                    )
+                    *
+                    weight
+                )
+
+        equity *= (
+            1
+            +
+            final_day_return
+        )
+
+        equity *= (
+            1
+            -
+            cost
+            *
+            len(holdings)
+            /
+            top_n
+        )
+
+        for symbol, old in holdings.items():
+
+            entry_date = (
+                old["entry_date"]
+            )
+
+            entry_open = float(
+                prepared[symbol]
+                .loc[
+                    entry_date,
+                    "Open",
+                ]
+            )
+
+            final_close = float(
+                prepared[symbol]
+                .loc[
+                    final_date,
+                    "Close",
+                ]
+            )
+
+            gross = (
+                final_close
+                /
+                entry_open
+                -
+                1
+            )
+
+            net = (
+                (1 + gross)
+                *
+                (1 - cost)
+                *
+                (1 - cost)
+                -
+                1
+            )
+
+            trades.append({
+                "symbol":
+                    symbol,
+
+                "entry_date":
+                    str(
+                        entry_date.date()
+                    ),
+
+                "exit_date":
+                    str(
+                        final_date.date()
+                    ),
+
+                "entry_score":
+                    old["entry_score"],
+
+                "exit_score":
+                    safe_int(
+                        prepared[symbol]
+                        .loc[
+                            final_date,
+                            "SCORE",
+                        ]
+                    ),
+
+                "return_pct":
+                    safe_float(
+                        net * 100,
+                        2,
+                    ),
+
+                "holding_days":
+                    (
+                        final_date
+                        -
+                        entry_date
+                    ).days,
+
+                "entry_breadth":
+                    old.get(
+                        "entry_breadth"
+                    ),
+
+                "forced_exit_at_test_end":
+                    True,
+            })
+
+            exit_count += 1
+
+        peak = max(
+            peak,
+            equity,
+        )
+
+        drawdown = (
+            equity
+            /
+            peak
+            -
+            1
+        ) * 100
+
+        max_drawdown = min(
+            max_drawdown,
+            drawdown,
+        )
+
+    # ========================================================
+    # 12. PERFORMANCE
+    # ========================================================
+
+    returns = [
+        x["return_pct"]
+        for x in trades
+        if x["return_pct"] is not None
+    ]
+
+    winners = [
+        x
+        for x in returns
+        if x > 0
+    ]
+
+    losers = [
+        x
+        for x in returns
+        if x <= 0
+    ]
+
+    if returns:
+
+        win_rate = (
+            len(winners)
+            /
+            len(returns)
+            *
+            100
+        )
+
+        avg_trade = float(
+            np.mean(returns)
+        )
+
+        median_trade = float(
+            np.median(returns)
+        )
+
+        avg_holding = float(
+            np.mean([
+                x["holding_days"]
+                for x in trades
+            ])
+        )
+
+    else:
+
+        win_rate = 0.0
+        avg_trade = 0.0
+        median_trade = 0.0
+        avg_holding = 0.0
+
+    gross_profit = sum(
+        winners
+    )
+
+    gross_loss = abs(
+        sum(losers)
+    )
+
+    if gross_loss > 0:
+
+        profit_factor = (
+            gross_profit
+            /
+            gross_loss
+        )
+
+    elif gross_profit > 0:
+
+        profit_factor = None
+
+    else:
+
+        profit_factor = 0.0
+
+    start_date = common_dates[0]
+    end_date = common_dates[-1]
+
+    elapsed_years = (
+        (
+            end_date
+            -
+            start_date
+        ).days
+        /
+        365.25
+    )
+
+    total_return = (
+        equity
+        -
+        1
+    ) * 100
+
+    if (
+        elapsed_years > 0
+        and
+        equity > 0
+    ):
+
+        cagr = (
+            equity
+            **
+            (
+                1
+                /
+                elapsed_years
+            )
+            -
+            1
+        ) * 100
+
+    else:
+
+        cagr = None
+
+    active_days = (
+        cash_days
+        +
+        invested_days
+    )
+
+    cash_pct = (
+        cash_days
+        /
+        active_days
+        *
+        100
+        if active_days
+        else 0
+    )
+
+    invested_pct = (
+        invested_days
+        /
+        active_days
+        *
+        100
+        if active_days
+        else 0
+    )
+
+    return {
+        "portfolio":
+            f"TOP_{top_n}",
+
+        "slots":
+            top_n,
+
+        "weighting":
+            "EQUAL_WEIGHT",
+
+        "rotation_model":
+            (
+                "V1.3_CONFIRM3"
+                if mode == "V13"
+                else
+                "V1.4_CONFIRM3_PLUS_BREADTH5"
+            ),
+
+        "performance": {
+            "strategy_total_return_pct":
+                safe_float(
+                    total_return,
+                    2,
+                ),
+
+            "strategy_cagr_pct":
+                safe_float(
+                    cagr,
+                    2,
+                ),
+
+            "max_drawdown_daily_pct":
+                safe_float(
+                    max_drawdown,
+                    2,
+                ),
+
+            "trade_count":
+                len(trades),
+
+            "win_rate_pct":
+                safe_float(
+                    win_rate,
+                    2,
+                ),
+
+            "profit_factor":
+                safe_float(
+                    profit_factor,
+                    3,
+                ),
+
+            "average_trade_pct":
+                safe_float(
+                    avg_trade,
+                    2,
+                ),
+
+            "median_trade_pct":
+                safe_float(
+                    median_trade,
+                    2,
+                ),
+
+            "average_holding_days":
+                safe_float(
+                    avg_holding,
+                    1,
+                ),
+
+            "entry_count":
+                entry_count,
+
+            "exit_count":
+                exit_count,
+
+            "rotation_count":
+                rotation_count,
+
+            "cash_days":
+                cash_days,
+
+            "cash_time_pct":
+                safe_float(
+                    cash_pct,
+                    2,
+                ),
+
+            "invested_time_pct":
+                safe_float(
+                    invested_pct,
+                    2,
+                ),
+
+            "final_equity":
+                safe_float(
+                    equity,
+                    6,
+                ),
+        },
+
+        "breadth_diagnostics": {
+            "breadth_min":
+                breadth_min,
+
+            "breadth_definition":
+                "Number of assets with Close > EMA200",
+
+            "blocked_entry_days":
+                (
+                    blocked_entry_days
+                    if mode == "V14"
+                    else 0
+                ),
+
+            "breadth_pass_empty_slot_days":
+                (
+                    breadth_pass_days
+                    if mode == "V14"
+                    else None
+                ),
+
+            "breadth_fail_empty_slot_days":
+                (
+                    breadth_fail_days
+                    if mode == "V14"
+                    else None
+                ),
+        },
+
+        "trades":
+            trades,
+
+        "rebalances":
+            rebalances,
+
+        "equity_curve":
+            equity_curve,
+    }
+
+
+# ============================================================
+# BENCHMARK
+# ============================================================
+
+def v14_dbc_benchmark(
+    prepared,
+    common_dates,
+):
+    if (
+        "DBC" not in prepared
+        or
+        not common_dates
+    ):
+        return None
+
+    dbc = prepared["DBC"]
+
+    first_date = common_dates[0]
+    last_date = common_dates[-1]
+
+    first_open = float(
+        dbc.loc[
+            first_date,
+            "Open",
+        ]
+    )
+
+    last_close = float(
+        dbc.loc[
+            last_date,
+            "Close",
+        ]
+    )
+
+    if first_open <= 0:
+        return None
+
+    return (
+        last_close
+        /
+        first_open
+        -
+        1
+    ) * 100
+
+
+# ============================================================
+# COMPACT RESULT
+# Used for OOS output so JSON is not unnecessarily huge.
+# ============================================================
+
+def v14_compact_result(
+    result,
+):
+    return {
+        "portfolio":
+            result["portfolio"],
+
+        "rotation_model":
+            result[
+                "rotation_model"
+            ],
+
+        "performance":
+            result[
+                "performance"
+            ],
+
+        "breadth_diagnostics":
+            result.get(
+                "breadth_diagnostics"
+            ),
+
+        "trades":
+            result[
+                "trades"
+            ],
+
+        "rebalances":
+            result[
+                "rebalances"
+            ],
+    }
+
+
+# ============================================================
+# 10-YEAR / N-YEAR CONTINUOUS COMPARISON
+#
+# V1.3 baseline
+# versus
+# V1.4 breadth5
+# ============================================================
+
+def run_v14_comparison(
+    years=10,
+    entry_score=75,
+    exit_score=50,
+    transaction_cost_pct=0.10,
+    breadth_min=5,
+):
+    (
+        prepared,
+        common_dates,
+        errors,
+    ) = prepare_rotation_data(
+        years
+    )
+
+    if len(common_dates) < 2:
+        raise ValueError(
+            "Yeterli ortak trading date yok."
+        )
+
+    # --------------------------------------------------------
+    # SAME DATA
+    # SAME PORTFOLIO ENGINE
+    # ONLY DIFFERENCE = BREADTH FILTER
+    # --------------------------------------------------------
+
+    v13 = run_v14_rotation_variant(
+        prepared=prepared,
+        common_dates=common_dates,
+        top_n=2,
+        entry_score=entry_score,
+        exit_score=exit_score,
+        transaction_cost_pct=transaction_cost_pct,
+        mode="V13",
+        breadth_min=breadth_min,
+    )
+
+    v14 = run_v14_rotation_variant(
+        prepared=prepared,
+        common_dates=common_dates,
+        top_n=2,
+        entry_score=entry_score,
+        exit_score=exit_score,
+        transaction_cost_pct=transaction_cost_pct,
+        mode="V14",
+        breadth_min=breadth_min,
+    )
+
+    dbc_return = v14_dbc_benchmark(
+        prepared,
+        common_dates,
+    )
+
+    p13 = v13["performance"]
+    p14 = v14["performance"]
+
+    return {
+        "experiment":
+            "V1.3_CONFIRM3_VS_V1.4_BREADTH5",
+
+        "generated_at_utc":
+            utc_now(),
+
+        "test_period": {
+            "start":
+                str(
+                    common_dates[0].date()
+                ),
+
+            "end":
+                str(
+                    common_dates[-1].date()
+                ),
+
+            "years_requested":
+                years,
+
+            "common_trading_days":
+                len(common_dates),
+        },
+
+        "frozen_settings": {
+            "portfolio":
+                "TOP_2_EQUAL_WEIGHT",
+
+            "entry_score":
+                entry_score,
+
+            "exit_score":
+                exit_score,
+
+            "confirmation_days":
+                V14_CONFIRMATION_DAYS,
+
+            "transaction_cost_pct_each_side":
+                transaction_cost_pct,
+
+            "ranking":
+                "SCORE, MOM120, MOM60, MOM20",
+
+            "base_entry":
+                "AL_ADAYI and score >= 75 for 3 consecutive closes",
+
+            "exit":
+                "V1.2A_SLOW_EXIT",
+
+            "rotation":
+                "V1.2C_STICKY_ROTATION",
+
+            "execution":
+                "Signal at close, execute next trading day open",
+
+            "long_only":
+                True,
+
+            "short":
+                False,
+
+            "leverage":
+                False,
+
+            "automatic_orders":
+                False,
+        },
+
+        "experimental_change": {
+            "name":
+                "GLOBAL_BREADTH_REGIME_FILTER",
+
+            "definition":
+                "Number of universe assets with Close > EMA200",
+
+            "minimum_required":
+                breadth_min,
+
+            "universe_size":
+                len(ASSETS),
+
+            "rule":
+                f"New entries allowed only when breadth >= {breadth_min}/{len(ASSETS)}",
+
+            "applies_to":
+                "NEW ENTRIES ONLY",
+
+            "existing_holdings":
+                "UNCHANGED; exit only by V1.2A slow exit",
+
+            "parameter_optimization":
+                False,
+        },
+
+        "benchmark": {
+            "symbol":
+                "DBC",
+
+            "buy_hold_return_pct":
+                safe_float(
+                    dbc_return,
+                    2,
+                ),
+        },
+
+        "summary_comparison": {
+            "v13_return_pct":
+                p13[
+                    "strategy_total_return_pct"
+                ],
+
+            "v14_return_pct":
+                p14[
+                    "strategy_total_return_pct"
+                ],
+
+            "return_difference_pct_points":
+                safe_float(
+                    (
+                        p14[
+                            "strategy_total_return_pct"
+                        ]
+                        -
+                        p13[
+                            "strategy_total_return_pct"
+                        ]
+                    ),
+                    2,
+                ),
+
+            "v13_cagr_pct":
+                p13[
+                    "strategy_cagr_pct"
+                ],
+
+            "v14_cagr_pct":
+                p14[
+                    "strategy_cagr_pct"
+                ],
+
+            "v13_max_dd_pct":
+                p13[
+                    "max_drawdown_daily_pct"
+                ],
+
+            "v14_max_dd_pct":
+                p14[
+                    "max_drawdown_daily_pct"
+                ],
+
+            "v13_profit_factor":
+                p13[
+                    "profit_factor"
+                ],
+
+            "v14_profit_factor":
+                p14[
+                    "profit_factor"
+                ],
+
+            "v13_trade_count":
+                p13[
+                    "trade_count"
+                ],
+
+            "v14_trade_count":
+                p14[
+                    "trade_count"
+                ],
+
+            "v13_cash_pct":
+                p13[
+                    "cash_time_pct"
+                ],
+
+            "v14_cash_pct":
+                p14[
+                    "cash_time_pct"
+                ],
+
+            "v14_blocked_entry_days":
+                v14[
+                    "breadth_diagnostics"
+                ][
+                    "blocked_entry_days"
+                ],
+        },
+
+        "v13_baseline":
+            v13,
+
+        "v14_experiment":
+            v14,
+
+        "data_errors":
+            errors,
+    }
+
+
+# ============================================================
+# CHRONOLOGICAL OOS COMPARISON
+#
+# IMPORTANT:
+# - No fitting
+# - No optimization
+# - Same folds for V1.3 and V1.4
+# - Each fold starts from CASH
+# - One previous trading day is supplied so the signal can
+#   execute at the first OOS open.
+# ============================================================
+
+def run_v14_oos_comparison(
+    years=10,
+    folds=4,
+    initial_train_pct=50,
+    entry_score=75,
+    exit_score=50,
+    transaction_cost_pct=0.10,
+    breadth_min=5,
+):
+    (
+        prepared,
+        common_dates,
+        errors,
+    ) = prepare_rotation_data(
+        years
+    )
+
+    n = len(common_dates)
+
+    if n < 500:
+        raise ValueError(
+            "OOS için yeterli ortak tarih yok."
+        )
+
+    folds = int(folds)
+
+    if folds < 2:
+        raise ValueError(
+            "folds en az 2 olmalı."
+        )
+
+    initial_train_pct = int(
+        initial_train_pct
+    )
+
+    if not (
+        30
+        <=
+        initial_train_pct
+        <=
+        80
+    ):
+        raise ValueError(
+            "initial_train_pct 30-80 arasında olmalı."
+        )
+
+    train_end = int(
+        n
+        *
+        initial_train_pct
+        /
+        100
+    )
+
+    train_end = max(
+        250,
+        train_end,
+    )
+
+    minimum_oos_days = (
+        folds
+        *
+        40
+    )
+
+    if (
+        n
+        -
+        train_end
+        <
+        minimum_oos_days
+    ):
+        train_end = (
+            n
+            -
+            minimum_oos_days
+        )
+
+    if train_end < 250:
+        raise ValueError(
+            "Train/OOS bölünmesi için yeterli veri yok."
+        )
+
+    remaining = (
+        n
+        -
+        train_end
+    )
+
+    if remaining < folds:
+        raise ValueError(
+            "OOS fold oluşturmak için yeterli veri yok."
+        )
+
+    # --------------------------------------------------------
+    # BUILD FOLD SIZES
+    # --------------------------------------------------------
+
+    base_fold_size = (
+        remaining
+        //
+        folds
+    )
+
+    remainder = (
+        remaining
+        %
+        folds
+    )
+
+    fold_sizes = []
+
+    for fold_idx in range(folds):
+
+        size = base_fold_size
+
+        if fold_idx < remainder:
+            size += 1
+
+        fold_sizes.append(
+            size
+        )
+
+    # --------------------------------------------------------
+    # RESULTS
+    # --------------------------------------------------------
+
+    fold_results = []
+
+    v13_compounded_equity = 1.0
+    v14_compounded_equity = 1.0
+
+    v13_positive_folds = 0
+    v14_positive_folds = 0
+
+    v13_pf_gt_1_folds = 0
+    v14_pf_gt_1_folds = 0
+
+    v13_total_trades = 0
+    v14_total_trades = 0
+
+    v13_total_rotations = 0
+    v14_total_rotations = 0
+
+    cursor = train_end
+
+    for fold_number in range(
+        1,
+        folds + 1
+    ):
+        fold_size = (
+            fold_sizes[
+                fold_number - 1
+            ]
+        )
+
+        oos_start_idx = cursor
+
+        oos_end_idx = min(
+            n,
+            cursor
+            +
+            fold_size,
+        )
+
+        if (
+            oos_end_idx
+            <=
+            oos_start_idx
+        ):
+            break
+
+        # ----------------------------------------------------
+        # Include ONE prior date only to generate signal
+        # for first OOS trading day.
+        #
+        # Portfolio starts CASH.
+        # ----------------------------------------------------
+
+        slice_start_idx = max(
+            0,
+            oos_start_idx - 1,
+        )
+
+        fold_dates = (
+            common_dates[
+                slice_start_idx:
+                oos_end_idx
+            ]
+        )
+
+        actual_oos_dates = (
+            common_dates[
+                oos_start_idx:
+                oos_end_idx
+            ]
+        )
+
+        if len(fold_dates) < 2:
+            cursor = oos_end_idx
+            continue
+
+        # ----------------------------------------------------
+        # V1.3 BASELINE
+        # ----------------------------------------------------
+
+        v13 = run_v14_rotation_variant(
+            prepared=prepared,
+            common_dates=fold_dates,
+            top_n=2,
+            entry_score=entry_score,
+            exit_score=exit_score,
+            transaction_cost_pct=transaction_cost_pct,
+            mode="V13",
+            breadth_min=breadth_min,
+        )
+
+        # ----------------------------------------------------
+        # V1.4 EXPERIMENT
+        # ----------------------------------------------------
+
+        v14 = run_v14_rotation_variant(
+            prepared=prepared,
+            common_dates=fold_dates,
+            top_n=2,
+            entry_score=entry_score,
+            exit_score=exit_score,
+            transaction_cost_pct=transaction_cost_pct,
+            mode="V14",
+            breadth_min=breadth_min,
+        )
+
+        p13 = v13["performance"]
+        p14 = v14["performance"]
+
+        r13 = (
+            p13[
+                "strategy_total_return_pct"
+            ]
+            /
+            100
+        )
+
+        r14 = (
+            p14[
+                "strategy_total_return_pct"
+            ]
+            /
+            100
+        )
+
+        v13_compounded_equity *= (
+            1 + r13
+        )
+
+        v14_compounded_equity *= (
+            1 + r14
+        )
+
+        if r13 > 0:
+            v13_positive_folds += 1
+
+        if r14 > 0:
+            v14_positive_folds += 1
+
+        pf13 = p13[
+            "profit_factor"
+        ]
+
+        pf14 = p14[
+            "profit_factor"
+        ]
+
+        if (
+            pf13 is not None
+            and
+            pf13 > 1
+        ):
+            v13_pf_gt_1_folds += 1
+
+        if (
+            pf14 is not None
+            and
+            pf14 > 1
+        ):
+            v14_pf_gt_1_folds += 1
+
+        v13_total_trades += (
+            p13[
+                "trade_count"
+            ]
+        )
+
+        v14_total_trades += (
+            p14[
+                "trade_count"
+            ]
+        )
+
+        v13_total_rotations += (
+            p13[
+                "rotation_count"
+            ]
+        )
+
+        v14_total_rotations += (
+            p14[
+                "rotation_count"
+            ]
+        )
+
+        fold_results.append({
+            "fold":
+                fold_number,
+
+            "train_period": {
+                "start":
+                    str(
+                        common_dates[0].date()
+                    ),
+
+                "end":
+                    str(
+                        common_dates[
+                            oos_start_idx - 1
+                        ].date()
+                    ),
+
+                "trading_days":
+                    oos_start_idx,
+            },
+
+            "oos_period": {
+                "start":
+                    str(
+                        actual_oos_dates[0].date()
+                    ),
+
+                "end":
+                    str(
+                        actual_oos_dates[-1].date()
+                    ),
+
+                "trading_days":
+                    len(
+                        actual_oos_dates
+                    ),
+            },
+
+            "v13_baseline":
+                v14_compact_result(
+                    v13
+                ),
+
+            "v14_experiment":
+                v14_compact_result(
+                    v14
+                ),
+
+            "comparison": {
+                "v13_return_pct":
+                    p13[
+                        "strategy_total_return_pct"
+                    ],
+
+                "v14_return_pct":
+                    p14[
+                        "strategy_total_return_pct"
+                    ],
+
+                "return_difference_pct_points":
+                    safe_float(
+                        (
+                            p14[
+                                "strategy_total_return_pct"
+                            ]
+                            -
+                            p13[
+                                "strategy_total_return_pct"
+                            ]
+                        ),
+                        2,
+                    ),
+
+                "v13_max_dd_pct":
+                    p13[
+                        "max_drawdown_daily_pct"
+                    ],
+
+                "v14_max_dd_pct":
+                    p14[
+                        "max_drawdown_daily_pct"
+                    ],
+
+                "v13_profit_factor":
+                    p13[
+                        "profit_factor"
+                    ],
+
+                "v14_profit_factor":
+                    p14[
+                        "profit_factor"
+                    ],
+
+                "v13_trade_count":
+                    p13[
+                        "trade_count"
+                    ],
+
+                "v14_trade_count":
+                    p14[
+                        "trade_count"
+                    ],
+
+                "v14_blocked_entry_days":
+                    v14[
+                        "breadth_diagnostics"
+                    ][
+                        "blocked_entry_days"
+                    ],
+            },
+        })
+
+        cursor = oos_end_idx
+
+    # ========================================================
+    # AGGREGATE OOS
+    # ========================================================
+
+    actual_fold_count = len(
+        fold_results
+    )
+
+    if actual_fold_count == 0:
+        raise ValueError(
+            "OOS fold üretilemedi."
+        )
+
+    first_oos_date = (
+        common_dates[
+            train_end
+        ]
+    )
+
+    last_oos_date = (
+        common_dates[-1]
+    )
+
+    oos_elapsed_years = (
+        (
+            last_oos_date
+            -
+            first_oos_date
+        ).days
+        /
+        365.25
+    )
+
+    v13_compounded_return = (
+        v13_compounded_equity
+        -
+        1
+    ) * 100
+
+    v14_compounded_return = (
+        v14_compounded_equity
+        -
+        1
+    ) * 100
+
+    if oos_elapsed_years > 0:
+
+        v13_cagr = (
+            v13_compounded_equity
+            **
+            (
+                1
+                /
+                oos_elapsed_years
+            )
+            -
+            1
+        ) * 100
+
+        v14_cagr = (
+            v14_compounded_equity
+            **
+            (
+                1
+                /
+                oos_elapsed_years
+            )
+            -
+            1
+        ) * 100
+
+    else:
+
+        v13_cagr = None
+        v14_cagr = None
+
+    return {
+        "experiment":
+            "V1.3_CONFIRM3_VS_V1.4_BREADTH5_OOS",
+
+        "generated_at_utc":
+            utc_now(),
+
+        "full_period": {
+            "start":
+                str(
+                    common_dates[0].date()
+                ),
+
+            "end":
+                str(
+                    common_dates[-1].date()
+                ),
+
+            "years_requested":
+                years,
+
+            "common_trading_days":
+                n,
+        },
+
+        "walk_forward": {
+            "initial_train_pct":
+                initial_train_pct,
+
+            "requested_folds":
+                folds,
+
+            "actual_folds":
+                actual_fold_count,
+
+            "rule":
+                (
+                    "Expanding chronological history; "
+                    "each OOS fold starts from CASH; "
+                    "no fitting or parameter changes"
+                ),
+
+            "oos_start":
+                str(
+                    first_oos_date.date()
+                ),
+
+            "oos_end":
+                str(
+                    last_oos_date.date()
+                ),
+        },
+
+        "frozen_settings": {
+            "portfolio":
+                "TOP_2_EQUAL_WEIGHT",
+
+            "entry_score":
+                entry_score,
+
+            "exit_score":
+                exit_score,
+
+            "confirmation_days":
+                V14_CONFIRMATION_DAYS,
+
+            "transaction_cost_pct_each_side":
+                transaction_cost_pct,
+
+            "ranking":
+                "SCORE, MOM120, MOM60, MOM20",
+
+            "exit":
+                "V1.2A_SLOW_EXIT",
+
+            "sticky_rotation":
+                True,
+
+            "signal_execution":
+                "Signal close -> next trading day open",
+
+            "parameter_optimization":
+                False,
+        },
+
+        "experimental_change": {
+            "v13":
+                "CONFIRM3 only",
+
+            "v14":
+                (
+                    "CONFIRM3 + global breadth >= "
+                    f"{breadth_min}/{len(ASSETS)}"
+                ),
+
+            "breadth_definition":
+                "Universe assets with Close > EMA200",
+
+            "applies_to":
+                "NEW ENTRIES ONLY",
+
+            "existing_positions":
+                "Not affected by breadth",
+        },
+
+        "aggregate_oos": {
+            "v13": {
+                "positive_fold_count":
+                    v13_positive_folds,
+
+                "pf_gt_1_fold_count":
+                    v13_pf_gt_1_folds,
+
+                "compounded_return_pct":
+                    safe_float(
+                        v13_compounded_return,
+                        2,
+                    ),
+
+                "compounded_cagr_pct":
+                    safe_float(
+                        v13_cagr,
+                        2,
+                    ),
+
+                "final_equity":
+                    safe_float(
+                        v13_compounded_equity,
+                        6,
+                    ),
+
+                "trade_count":
+                    v13_total_trades,
+
+                "rotation_count":
+                    v13_total_rotations,
+            },
+
+            "v14": {
+                "positive_fold_count":
+                    v14_positive_folds,
+
+                "pf_gt_1_fold_count":
+                    v14_pf_gt_1_folds,
+
+                "compounded_return_pct":
+                    safe_float(
+                        v14_compounded_return,
+                        2,
+                    ),
+
+                "compounded_cagr_pct":
+                    safe_float(
+                        v14_cagr,
+                        2,
+                    ),
+
+                "final_equity":
+                    safe_float(
+                        v14_compounded_equity,
+                        6,
+                    ),
+
+                "trade_count":
+                    v14_total_trades,
+
+                "rotation_count":
+                    v14_total_rotations,
+            },
+
+            "difference": {
+                "return_pct_points":
+                    safe_float(
+                        (
+                            v14_compounded_return
+                            -
+                            v13_compounded_return
+                        ),
+                        2,
+                    ),
+
+                "cagr_pct_points":
+                    safe_float(
+                        (
+                            v14_cagr
+                            -
+                            v13_cagr
+                        )
+                        if (
+                            v14_cagr is not None
+                            and
+                            v13_cagr is not None
+                        )
+                        else None,
+                        2,
+                    ),
+
+                "positive_folds_change":
+                    (
+                        v14_positive_folds
+                        -
+                        v13_positive_folds
+                    ),
+
+                "pf_gt_1_folds_change":
+                    (
+                        v14_pf_gt_1_folds
+                        -
+                        v13_pf_gt_1_folds
+                    ),
+
+                "trade_count_change":
+                    (
+                        v14_total_trades
+                        -
+                        v13_total_trades
+                    ),
+            },
+        },
+
+        "folds":
+            fold_results,
+
+        "data_errors":
+            errors,
+
+        "research_warning":
+            (
+                "V1.4 breadth filter was designed after reviewing "
+                "earlier V1.2D/V1.3 results. Therefore these historical "
+                "folds are research evidence, not pristine untouched OOS."
+            ),
+    }
+
+
+# ============================================================
+# FASTAPI ENDPOINT
+# CONTINUOUS 10Y COMPARISON
+#
+# Example:
+# /v14-comparison?years=10
+# ============================================================
+
+@app.get("/v14-comparison")
+def v14_comparison_endpoint(
+    years: int = 10,
+):
+    return run_v14_comparison(
+        years=years,
+        entry_score=75,
+        exit_score=50,
+        transaction_cost_pct=0.10,
+        breadth_min=5,
+    )
+
+
+# ============================================================
+# FASTAPI ENDPOINT
+# SAME 4-FOLD OOS COMPARISON
+#
+# Example:
+# /v14-oos?years=10&folds=4&initial_train_pct=50
+# ============================================================
+
+@app.get("/v14-oos")
+def v14_oos_endpoint(
+    years: int = 10,
+    folds: int = 4,
+    initial_train_pct: int = 50,
+):
+    return run_v14_oos_comparison(
+        years=years,
+        folds=folds,
+        initial_train_pct=initial_train_pct,
+        entry_score=75,
+        exit_score=50,
+        transaction_cost_pct=0.10,
+        breadth_min=5,
+    )
