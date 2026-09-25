@@ -6,141 +6,53 @@ import numpy as np
 import math
 from datetime import datetime, timezone
 
-
 # ============================================================
-# COMMODITY ROTATION BOT
-# Version: 1.2A
-#
-# LONG ONLY
-# NO SHORT
-# NO LEVERAGE
-# NO AUTOMATIC ORDERS
-#
-# v1.2A:
-# Entry sistemi v1.1 ile aynı.
-# Score sistemi v1.1 ile aynı.
-# Sadece backtest EXIT mekanizması yavaşlatıldı.
-#
-# EXIT:
-# score <= exit_score
-# OR EMA20 < EMA50
-# OR Close < EMA100
-# OR EMA50 < EMA200
+# COMMODITY ROTATION BOT v1.2B
+# LONG ONLY - NO SHORT - NO LEVERAGE - NO AUTOMATIC ORDERS
 # ============================================================
-
 
 app = FastAPI(
     title="Commodity Rotation Bot",
     description="Long-only commodity ETF/ETP rotation system",
-    version="1.2A",
+    version="1.2B",
 )
 
-MODEL_NAME = "COMMODITY-ROTATION-V1.2A"
-
-
-# ============================================================
-# ASSETS
-# ============================================================
+MODEL_NAME = "COMMODITY-ROTATION-V1.2B"
 
 ASSETS = {
-
-    "GLD": {
-        "name": "Gold",
-        "tr_name": "Altın",
-        "group": "METALS",
-    },
-
-    "SLV": {
-        "name": "Silver",
-        "tr_name": "Gümüş",
-        "group": "METALS",
-    },
-
-    "CPER": {
-        "name": "Copper",
-        "tr_name": "Bakır",
-        "group": "METALS",
-    },
-
-    "USO": {
-        "name": "Crude Oil",
-        "tr_name": "Petrol",
-        "group": "ENERGY",
-    },
-
-    "UNG": {
-        "name": "Natural Gas",
-        "tr_name": "Doğal Gaz",
-        "group": "ENERGY",
-    },
-
-    "DBA": {
-        "name": "Agriculture Basket",
-        "tr_name": "Tarım Sepeti",
-        "group": "AGRICULTURE",
-    },
-
-    "WEAT": {
-        "name": "Wheat",
-        "tr_name": "Buğday",
-        "group": "AGRICULTURE",
-    },
-
-    "CORN": {
-        "name": "Corn",
-        "tr_name": "Mısır",
-        "group": "AGRICULTURE",
-    },
-
-    "SOYB": {
-        "name": "Soybeans",
-        "tr_name": "Soya",
-        "group": "AGRICULTURE",
-    },
-
-    "DBC": {
-        "name": "Broad Commodities",
-        "tr_name": "Geniş Emtia Sepeti",
-        "group": "BROAD_COMMODITY",
-    },
+    "GLD": {"name": "Gold", "tr_name": "Altın", "group": "METALS"},
+    "SLV": {"name": "Silver", "tr_name": "Gümüş", "group": "METALS"},
+    "CPER": {"name": "Copper", "tr_name": "Bakır", "group": "METALS"},
+    "USO": {"name": "Crude Oil", "tr_name": "Petrol", "group": "ENERGY"},
+    "UNG": {"name": "Natural Gas", "tr_name": "Doğal Gaz", "group": "ENERGY"},
+    "DBA": {"name": "Agriculture Basket", "tr_name": "Tarım Sepeti", "group": "AGRICULTURE"},
+    "WEAT": {"name": "Wheat", "tr_name": "Buğday", "group": "AGRICULTURE"},
+    "CORN": {"name": "Corn", "tr_name": "Mısır", "group": "AGRICULTURE"},
+    "SOYB": {"name": "Soybeans", "tr_name": "Soya", "group": "AGRICULTURE"},
+    "DBC": {"name": "Broad Commodities", "tr_name": "Geniş Emtia Sepeti", "group": "BROAD_COMMODITY"},
 }
 
-
-# ============================================================
-# GENERAL HELPERS
-# ============================================================
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
 
 def safe_float(value, digits=4):
-
     try:
-
         value = float(value)
-
         if math.isnan(value) or math.isinf(value):
             return None
-
         return round(value, digits)
-
     except Exception:
-
         return None
 
 
 def safe_int(value):
-
     try:
-
         if pd.isna(value):
             return None
-
         return int(value)
-
     except Exception:
-
         return None
 
 
@@ -149,7 +61,6 @@ def safe_int(value):
 # ============================================================
 
 def download_history(symbol, period="10y"):
-
     symbol = symbol.upper()
 
     df = yf.download(
@@ -162,82 +73,43 @@ def download_history(symbol, period="10y"):
     )
 
     if df is None or df.empty:
-
-        raise ValueError(
-            f"{symbol} için veri alınamadı."
-        )
+        raise ValueError(f"{symbol} için veri alınamadı.")
 
     if isinstance(df.columns, pd.MultiIndex):
-
         try:
-
-            df = df.xs(
-                symbol,
-                axis=1,
-                level=-1,
-                drop_level=True,
-            )
-
+            df = df.xs(symbol, axis=1, level=-1, drop_level=True)
         except Exception:
-
             df.columns = [
                 x[0] if isinstance(x, tuple) else x
                 for x in df.columns
             ]
 
-    required = [
-        "Open",
-        "High",
-        "Low",
-        "Close",
-        "Volume",
-    ]
+    required = ["Open", "High", "Low", "Close", "Volume"]
 
     for column in required:
-
         if column not in df.columns:
-
-            raise ValueError(
-                f"{symbol}: {column} bulunamadı."
-            )
+            raise ValueError(f"{symbol}: {column} bulunamadı.")
 
     df = df[required].copy()
 
     for column in required:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
 
-        df[column] = pd.to_numeric(
-            df[column],
-            errors="coerce",
-        )
-
-    df = df.dropna(
-        subset=[
-            "Open",
-            "High",
-            "Low",
-            "Close",
-        ]
-    )
+    df = df.dropna(subset=["Open", "High", "Low", "Close"])
 
     if len(df) < 220:
-
-        raise ValueError(
-            f"{symbol}: yeterli tarihsel veri yok."
-        )
+        raise ValueError(f"{symbol}: yeterli tarihsel veri yok.")
 
     return df
 
 
 # ============================================================
-# RSI
+# INDICATORS
 # ============================================================
 
 def calculate_rsi(close, period=14):
-
     delta = close.diff()
-
     gain = delta.clip(lower=0)
-
     loss = -delta.clip(upper=0)
 
     avg_gain = gain.ewm(
@@ -252,53 +124,21 @@ def calculate_rsi(close, period=14):
         min_periods=period,
     ).mean()
 
-    rs = (
-        avg_gain
-        /
-        avg_loss.replace(0, np.nan)
-    )
-
-    rsi = 100 - (
-        100 / (1 + rs)
-    )
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
 
     return rsi.fillna(100)
 
 
-# ============================================================
-# ATR
-# ============================================================
-
 def calculate_atr(df, period=14):
+    previous_close = df["Close"].shift(1)
 
-    previous_close = (
-        df["Close"].shift(1)
-    )
-
-    tr1 = (
-        df["High"]
-        -
-        df["Low"]
-    ).abs()
-
-    tr2 = (
-        df["High"]
-        -
-        previous_close
-    ).abs()
-
-    tr3 = (
-        df["Low"]
-        -
-        previous_close
-    ).abs()
+    tr1 = (df["High"] - df["Low"]).abs()
+    tr2 = (df["High"] - previous_close).abs()
+    tr3 = (df["Low"] - previous_close).abs()
 
     true_range = pd.concat(
-        [
-            tr1,
-            tr2,
-            tr3,
-        ],
+        [tr1, tr2, tr3],
         axis=1,
     ).max(axis=1)
 
@@ -309,434 +149,170 @@ def calculate_atr(df, period=14):
     ).mean()
 
 
-# ============================================================
-# INDICATORS
-# ============================================================
-
 def calculate_indicators(df):
-
     df = df.copy()
-
     close = df["Close"]
 
-    # TREND
+    df["EMA20"] = close.ewm(span=20, adjust=False).mean()
+    df["EMA50"] = close.ewm(span=50, adjust=False).mean()
+    df["EMA100"] = close.ewm(span=100, adjust=False).mean()
+    df["EMA200"] = close.ewm(span=200, adjust=False).mean()
 
-    df["EMA20"] = close.ewm(
-        span=20,
+    df["MOM20"] = close.pct_change(20) * 100
+    df["MOM60"] = close.pct_change(60) * 100
+    df["MOM120"] = close.pct_change(120) * 100
+
+    df["RSI14"] = calculate_rsi(close, 14)
+
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+
+    df["MACD"] = ema12 - ema26
+    df["MACD_SIGNAL"] = df["MACD"].ewm(
+        span=9,
         adjust=False,
     ).mean()
+    df["MACD_HIST"] = df["MACD"] - df["MACD_SIGNAL"]
 
-    df["EMA50"] = close.ewm(
-        span=50,
-        adjust=False,
-    ).mean()
+    df["ATR14"] = calculate_atr(df, 14)
+    df["ATR_PCT"] = df["ATR14"] / close * 100
 
-    df["EMA100"] = close.ewm(
-        span=100,
-        adjust=False,
-    ).mean()
+    df["VOL20"] = df["Volume"].rolling(20).mean()
+    df["VOLUME_RATIO"] = df["Volume"] / df["VOL20"]
 
-    df["EMA200"] = close.ewm(
-        span=200,
-        adjust=False,
-    ).mean()
+    df["DIST_EMA20"] = (close / df["EMA20"] - 1) * 100
+    df["DIST_EMA50"] = (close / df["EMA50"] - 1) * 100
+    df["DIST_EMA200"] = (close / df["EMA200"] - 1) * 100
 
-    # MOMENTUM
-
-    df["MOM20"] = (
-        close.pct_change(20) * 100
-    )
-
-    df["MOM60"] = (
-        close.pct_change(60) * 100
-    )
-
-    df["MOM120"] = (
-        close.pct_change(120) * 100
-    )
-
-    # RSI
-
-    df["RSI14"] = calculate_rsi(
-        close,
-        14,
-    )
-
-    # MACD
-
-    ema12 = close.ewm(
-        span=12,
-        adjust=False,
-    ).mean()
-
-    ema26 = close.ewm(
-        span=26,
-        adjust=False,
-    ).mean()
-
-    df["MACD"] = (
-        ema12 - ema26
-    )
-
-    df["MACD_SIGNAL"] = (
-        df["MACD"]
-        .ewm(
-            span=9,
-            adjust=False,
-        )
-        .mean()
-    )
-
-    df["MACD_HIST"] = (
-        df["MACD"]
-        -
-        df["MACD_SIGNAL"]
-    )
-
-    # ATR
-
-    df["ATR14"] = calculate_atr(
-        df,
-        14,
-    )
-
-    df["ATR_PCT"] = (
-        df["ATR14"]
-        /
-        close
-        *
-        100
-    )
-
-    # VOLUME
-
-    df["VOL20"] = (
-        df["Volume"]
-        .rolling(20)
-        .mean()
-    )
-
-    df["VOLUME_RATIO"] = (
-        df["Volume"]
-        /
-        df["VOL20"]
-    )
-
-    # DISTANCE TO EMA
-
-    df["DIST_EMA20"] = (
-        (
-            close
-            /
-            df["EMA20"]
-        )
-        - 1
-    ) * 100
-
-    df["DIST_EMA50"] = (
-        (
-            close
-            /
-            df["EMA50"]
-        )
-        - 1
-    ) * 100
-
-    df["DIST_EMA200"] = (
-        (
-            close
-            /
-            df["EMA200"]
-        )
-        - 1
-    ) * 100
-
-    # 1 YEAR DRAWDOWN
-
-    high252 = (
-        close
-        .rolling(252)
-        .max()
-    )
-
-    df["DRAWDOWN_252"] = (
-        (
-            close
-            /
-            high252
-        )
-        - 1
-    ) * 100
+    high252 = close.rolling(252).max()
+    df["DRAWDOWN_252"] = (close / high252 - 1) * 100
 
     return df
 
 
 # ============================================================
-# SCORE ENGINE
+# SCORE
 # ============================================================
 
 def calculate_score(row):
-
     score = 0
-
     reasons = []
-
     warnings = []
 
     close = row["Close"]
-
     ema20 = row["EMA20"]
-
     ema50 = row["EMA50"]
-
     ema200 = row["EMA200"]
 
     mom20 = row["MOM20"]
-
     mom60 = row["MOM60"]
-
     mom120 = row["MOM120"]
 
     rsi = row["RSI14"]
-
     atr_pct = row["ATR_PCT"]
 
     macd = row["MACD"]
-
     macd_signal = row["MACD_SIGNAL"]
-
     macd_hist = row["MACD_HIST"]
 
-    # ========================================================
-    # TREND - MAX 40
-    # ========================================================
-
+    # TREND - 40
     if close > ema200:
-
         score += 15
-
-        reasons.append(
-            "Fiyat EMA200 üzerinde"
-        )
-
+        reasons.append("Fiyat EMA200 üzerinde")
     else:
-
-        warnings.append(
-            "Fiyat EMA200 altında"
-        )
+        warnings.append("Fiyat EMA200 altında")
 
     if ema50 > ema200:
-
         score += 10
-
-        reasons.append(
-            "EMA50 > EMA200"
-        )
-
+        reasons.append("EMA50 > EMA200")
     else:
-
-        warnings.append(
-            "EMA50 EMA200 üzerinde değil"
-        )
+        warnings.append("EMA50 EMA200 üzerinde değil")
 
     if ema20 > ema50:
-
         score += 10
-
-        reasons.append(
-            "EMA20 > EMA50"
-        )
-
+        reasons.append("EMA20 > EMA50")
     else:
-
-        warnings.append(
-            "Kısa vadeli trend zayıf"
-        )
+        warnings.append("Kısa vadeli trend zayıf")
 
     if close > ema20:
-
         score += 5
+        reasons.append("Fiyat EMA20 üzerinde")
 
-        reasons.append(
-            "Fiyat EMA20 üzerinde"
-        )
-
-    # ========================================================
-    # MOMENTUM - MAX 30
-    # ========================================================
-
+    # MOMENTUM - 30
     if mom20 > 0:
-
         score += 5
-
-        reasons.append(
-            "20 günlük momentum pozitif"
-        )
+        reasons.append("20 günlük momentum pozitif")
 
     if mom60 > 0:
-
         score += 10
-
-        reasons.append(
-            "60 günlük momentum pozitif"
-        )
-
+        reasons.append("60 günlük momentum pozitif")
     else:
-
-        warnings.append(
-            "60 günlük momentum negatif"
-        )
+        warnings.append("60 günlük momentum negatif")
 
     if mom120 > 0:
-
         score += 10
-
-        reasons.append(
-            "120 günlük momentum pozitif"
-        )
-
+        reasons.append("120 günlük momentum pozitif")
     else:
+        warnings.append("120 günlük momentum negatif")
 
-        warnings.append(
-            "120 günlük momentum negatif"
-        )
-
-    if (
-        mom20 > 0
-        and mom60 > 0
-        and mom120 > 0
-    ):
-
+    if mom20 > 0 and mom60 > 0 and mom120 > 0:
         score += 5
+        reasons.append("Momentum zaman dilimleri uyumlu")
 
-        reasons.append(
-            "Momentum zaman dilimleri uyumlu"
-        )
-
-    # ========================================================
-    # MACD - MAX 10
-    # ========================================================
-
+    # MACD - 10
     if macd > macd_signal:
-
         score += 5
-
-        reasons.append(
-            "MACD signal üzerinde"
-        )
-
+        reasons.append("MACD signal üzerinde")
     else:
-
-        warnings.append(
-            "MACD kısa vadeli momentum zayıflıyor"
-        )
+        warnings.append("MACD kısa vadeli momentum zayıflıyor")
 
     if macd_hist > 0:
-
         score += 5
+        reasons.append("MACD histogram pozitif")
 
-        reasons.append(
-            "MACD histogram pozitif"
-        )
-
-    # ========================================================
-    # RSI - MAX 10
-    # ========================================================
-
+    # RSI - 10
     if 45 <= rsi <= 65:
-
         score += 10
-
-        reasons.append(
-            "RSI sağlıklı momentum bölgesinde"
-        )
+        reasons.append("RSI sağlıklı momentum bölgesinde")
 
     elif 40 <= rsi < 45:
-
         score += 5
 
     elif 65 < rsi <= 70:
-
         score += 5
-
-        warnings.append(
-            "RSI yükselmiş durumda"
-        )
+        warnings.append("RSI yükselmiş durumda")
 
     elif rsi > 70:
-
-        warnings.append(
-            "RSI aşırı alım bölgesinde"
-        )
+        warnings.append("RSI aşırı alım bölgesinde")
 
     else:
+        warnings.append("RSI zayıf")
 
-        warnings.append(
-            "RSI zayıf"
-        )
-
-    # ========================================================
-    # VOLATILITY - MAX 10
-    # ========================================================
-
+    # VOLATILITY - 10
     if atr_pct <= 3:
-
         score += 10
-
-        reasons.append(
-            "Volatilite kontrollü"
-        )
+        reasons.append("Volatilite kontrollü")
 
     elif atr_pct <= 5:
-
         score += 5
-
-        reasons.append(
-            "Volatilite orta düzeyde"
-        )
+        reasons.append("Volatilite orta düzeyde")
 
     else:
+        warnings.append("Volatilite yüksek")
 
-        warnings.append(
-            "Volatilite yüksek"
-        )
+    score = max(0, min(int(score), 100))
 
-    score = max(
-        0,
-        min(
-            int(score),
-            100,
-        ),
-    )
-
-    return (
-        score,
-        reasons,
-        warnings,
-    )
+    return score, reasons, warnings
 
 
-# ============================================================
-# SIGNAL
-# ============================================================
-
-def determine_signal(
-    row,
-    score,
-):
-
+def determine_signal(row, score):
     close = row["Close"]
-
     ema20 = row["EMA20"]
-
     ema50 = row["EMA50"]
-
     ema200 = row["EMA200"]
 
     mom60 = row["MOM60"]
-
     mom120 = row["MOM120"]
-
     rsi = row["RSI14"]
 
     long_term_trend = (
@@ -744,18 +320,14 @@ def determine_signal(
         and ema50 > ema200
     )
 
-    medium_term_trend = (
-        ema20 > ema50
-    )
+    medium_term_trend = ema20 > ema50
 
     momentum_ok = (
         mom60 > 0
         and mom120 > 0
     )
 
-    rsi_ok = (
-        40 <= rsi <= 70
-    )
+    rsi_ok = 40 <= rsi <= 70
 
     if (
         score >= 75
@@ -764,248 +336,110 @@ def determine_signal(
         and momentum_ok
         and rsi_ok
     ):
-
         return "AL_ADAYI"
 
-    if (
-        score >= 60
-        and long_term_trend
-    ):
-
+    if score >= 60 and long_term_trend:
         return "IZLE"
 
     return "BEKLE"
 
 
 # ============================================================
-# ANALYZE SINGLE ASSET
+# SINGLE ANALYSIS
 # ============================================================
 
-def analyze_symbol(
-    symbol,
-    period="10y",
-):
-
+def analyze_symbol(symbol, period="10y"):
     symbol = symbol.upper()
 
     if symbol not in ASSETS:
+        raise ValueError(f"{symbol} ürün listesinde yok.")
 
-        raise ValueError(
-            f"{symbol} ürün listesinde yok."
-        )
-
-    df = download_history(
-        symbol,
-        period,
-    )
-
-    df = calculate_indicators(
-        df
-    )
+    df = download_history(symbol, period)
+    df = calculate_indicators(df)
 
     clean = df.dropna().copy()
 
     if clean.empty:
-
-        raise ValueError(
-            f"{symbol}: gösterge üretilemedi."
-        )
+        raise ValueError(f"{symbol}: gösterge üretilemedi.")
 
     row = clean.iloc[-1]
 
-    score, reasons, warnings = (
-        calculate_score(row)
-    )
-
-    signal = determine_signal(
-        row,
-        score,
-    )
+    score, reasons, warnings = calculate_score(row)
+    signal = determine_signal(row, score)
 
     asset = ASSETS[symbol]
 
     return {
-
         "model": MODEL_NAME,
-
         "symbol": symbol,
-
         "name": asset["name"],
-
         "tr_name": asset["tr_name"],
-
         "group": asset["group"],
-
-        "date": str(
-            clean.index[-1].date()
-        ),
-
-        "close": safe_float(
-            row["Close"],
-            2,
-        ),
-
+        "date": str(clean.index[-1].date()),
+        "close": safe_float(row["Close"], 2),
         "signal": signal,
-
         "score": score,
 
         "trend": {
-
-            "ema20": safe_float(
-                row["EMA20"],
-                2,
-            ),
-
-            "ema50": safe_float(
-                row["EMA50"],
-                2,
-            ),
-
-            "ema100": safe_float(
-                row["EMA100"],
-                2,
-            ),
-
-            "ema200": safe_float(
-                row["EMA200"],
-                2,
-            ),
-
-            "distance_ema20_pct":
-                safe_float(
-                    row["DIST_EMA20"],
-                    2,
-                ),
-
-            "distance_ema50_pct":
-                safe_float(
-                    row["DIST_EMA50"],
-                    2,
-                ),
-
-            "distance_ema200_pct":
-                safe_float(
-                    row["DIST_EMA200"],
-                    2,
-                ),
+            "ema20": safe_float(row["EMA20"], 2),
+            "ema50": safe_float(row["EMA50"], 2),
+            "ema100": safe_float(row["EMA100"], 2),
+            "ema200": safe_float(row["EMA200"], 2),
+            "distance_ema20_pct": safe_float(row["DIST_EMA20"], 2),
+            "distance_ema50_pct": safe_float(row["DIST_EMA50"], 2),
+            "distance_ema200_pct": safe_float(row["DIST_EMA200"], 2),
         },
 
         "momentum": {
-
-            "20d_pct": safe_float(
-                row["MOM20"],
-                2,
-            ),
-
-            "60d_pct": safe_float(
-                row["MOM60"],
-                2,
-            ),
-
-            "120d_pct": safe_float(
-                row["MOM120"],
-                2,
-            ),
+            "20d_pct": safe_float(row["MOM20"], 2),
+            "60d_pct": safe_float(row["MOM60"], 2),
+            "120d_pct": safe_float(row["MOM120"], 2),
         },
 
-        "rsi14": safe_float(
-            row["RSI14"],
-            2,
-        ),
+        "rsi14": safe_float(row["RSI14"], 2),
 
         "macd": {
-
-            "line": safe_float(
-                row["MACD"],
-                4,
-            ),
-
-            "signal": safe_float(
-                row["MACD_SIGNAL"],
-                4,
-            ),
-
-            "histogram": safe_float(
-                row["MACD_HIST"],
-                4,
-            ),
+            "line": safe_float(row["MACD"], 4),
+            "signal": safe_float(row["MACD_SIGNAL"], 4),
+            "histogram": safe_float(row["MACD_HIST"], 4),
         },
 
         "risk": {
-
-            "atr14": safe_float(
-                row["ATR14"],
-                4,
-            ),
-
-            "atr_pct": safe_float(
-                row["ATR_PCT"],
-                2,
-            ),
-
-            "drawdown_1y_pct":
-                safe_float(
-                    row["DRAWDOWN_252"],
-                    2,
-                ),
+            "atr14": safe_float(row["ATR14"], 4),
+            "atr_pct": safe_float(row["ATR_PCT"], 2),
+            "drawdown_1y_pct": safe_float(row["DRAWDOWN_252"], 2),
         },
 
         "volume": {
-
-            "current": safe_int(
-                row["Volume"]
-            ),
-
-            "average_20d": safe_int(
-                row["VOL20"]
-            ),
-
-            "ratio": safe_float(
-                row["VOLUME_RATIO"],
-                2,
-            ),
+            "current": safe_int(row["Volume"]),
+            "average_20d": safe_int(row["VOL20"]),
+            "ratio": safe_float(row["VOLUME_RATIO"], 2),
         },
 
         "reasons": reasons,
-
         "warnings": warnings,
-
-        "generated_at_utc":
-            utc_now(),
+        "generated_at_utc": utc_now(),
     }
 
 
 # ============================================================
-# SCANNER
+# SCAN
 # ============================================================
 
 def scan_all_assets():
-
     results = []
-
     errors = []
 
     for symbol in ASSETS:
-
         try:
-
-            result = analyze_symbol(
-                symbol,
-                "10y",
-            )
-
             results.append(
-                result
+                analyze_symbol(symbol, "10y")
             )
-
         except Exception as exc:
-
-            errors.append(
-                {
-                    "symbol": symbol,
-                    "error": str(exc),
-                }
-            )
+            errors.append({
+                "symbol": symbol,
+                "error": str(exc),
+            })
 
     results = sorted(
         results,
@@ -1013,92 +447,50 @@ def scan_all_assets():
         reverse=True,
     )
 
-    for index, item in enumerate(
-        results,
-        start=1,
-    ):
-
+    for index, item in enumerate(results, start=1):
         item["overall_rank"] = index
 
-    metals = [
-        x for x in results
-        if x["group"] == "METALS"
-    ]
-
-    energy = [
-        x for x in results
-        if x["group"] == "ENERGY"
-    ]
-
-    agriculture = [
-        x for x in results
-        if x["group"] == "AGRICULTURE"
-    ]
-
-    broad = [
-        x for x in results
-        if x["group"] == "BROAD_COMMODITY"
-    ]
-
-    buy_candidates = [
-        x for x in results
-        if x["signal"] == "AL_ADAYI"
-    ]
-
-    watch_candidates = [
-        x for x in results
-        if x["signal"] == "IZLE"
-    ]
-
-    wait_candidates = [
-        x for x in results
-        if x["signal"] == "BEKLE"
-    ]
-
     return {
-
         "model": MODEL_NAME,
-
-        "generated_at_utc":
-            utc_now(),
-
-        "asset_count":
-            len(results),
-
-        "buy_candidate_count":
-            len(buy_candidates),
-
-        "watch_candidate_count":
-            len(watch_candidates),
-
-        "wait_candidate_count":
-            len(wait_candidates),
-
-        "ranking":
-            results,
-
+        "generated_at_utc": utc_now(),
+        "asset_count": len(results),
+        "buy_candidate_count": sum(
+            x["signal"] == "AL_ADAYI"
+            for x in results
+        ),
+        "watch_candidate_count": sum(
+            x["signal"] == "IZLE"
+            for x in results
+        ),
+        "wait_candidate_count": sum(
+            x["signal"] == "BEKLE"
+            for x in results
+        ),
+        "ranking": results,
         "groups": {
-
-            "metals":
-                metals,
-
-            "energy":
-                energy,
-
-            "agriculture":
-                agriculture,
-
-            "broad_commodity_reference":
-                broad,
+            "metals": [
+                x for x in results
+                if x["group"] == "METALS"
+            ],
+            "energy": [
+                x for x in results
+                if x["group"] == "ENERGY"
+            ],
+            "agriculture": [
+                x for x in results
+                if x["group"] == "AGRICULTURE"
+            ],
+            "broad_commodity_reference": [
+                x for x in results
+                if x["group"] == "BROAD_COMMODITY"
+            ],
         },
-
-        "errors":
-            errors,
+        "errors": errors,
     }
 
 
 # ============================================================
-# BACKTEST
+# V1.2A SINGLE-ASSET BACKTEST
 # ============================================================
 
 def run_backtest(
@@ -1108,460 +500,207 @@ def run_backtest(
     exit_score=50,
     transaction_cost_pct=0.10,
 ):
-
     symbol = symbol.upper()
 
     if symbol not in ASSETS:
+        raise ValueError(f"{symbol} ürün listesinde yok.")
 
-        raise ValueError(
-            f"{symbol} ürün listesinde yok."
-        )
-
-    period = f"{years}y"
-
-    df = download_history(
-        symbol,
-        period,
-    )
-
-    df = calculate_indicators(
-        df
-    )
-
+    df = download_history(symbol, f"{years}y")
+    df = calculate_indicators(df)
     df = df.dropna().copy()
 
     if len(df) < 250:
-
-        raise ValueError(
-            "Backtest için yeterli veri yok."
-        )
+        raise ValueError("Backtest için yeterli veri yok.")
 
     scores = []
-
     signals = []
 
     for _, row in df.iterrows():
-
-        score, _, _ = (
-            calculate_score(row)
-        )
-
-        signal = (
-            determine_signal(
-                row,
-                score,
-            )
-        )
-
+        score, _, _ = calculate_score(row)
         scores.append(score)
-
-        signals.append(signal)
+        signals.append(
+            determine_signal(row, score)
+        )
 
     df["SCORE"] = scores
-
     df["MODEL_SIGNAL"] = signals
 
-    cost = (
-        transaction_cost_pct
-        /
-        100
-    )
+    cost = transaction_cost_pct / 100
 
     in_position = False
-
     entry_price = None
-
     entry_date = None
-
     entry_score_value = None
 
     trades = []
-
     equity = 1.0
 
-    for i in range(
-        len(df) - 1
-    ):
-
+    for i in range(len(df) - 1):
         current = df.iloc[i]
-
         next_row = df.iloc[i + 1]
-
         next_date = df.index[i + 1]
 
-        score = int(
-            current["SCORE"]
-        )
-
-        signal = current[
-            "MODEL_SIGNAL"
-        ]
-
-        next_open = float(
-            next_row["Open"]
-        )
-
-        # ====================================================
-        # ENTRY
-        # ====================================================
+        score = int(current["SCORE"])
+        signal = current["MODEL_SIGNAL"]
+        next_open = float(next_row["Open"])
 
         if not in_position:
 
             if (
                 score >= entry_score
-                and
-                signal == "AL_ADAYI"
+                and signal == "AL_ADAYI"
             ):
-
-                entry_price = (
-                    next_open
-                    *
-                    (1 + cost)
-                )
-
+                entry_price = next_open * (1 + cost)
                 entry_date = next_date
-
                 entry_score_value = score
-
                 in_position = True
-
-        # ====================================================
-        # EXIT - V1.2A
-        # ====================================================
 
         else:
 
-            close = float(
-                current["Close"]
-            )
-
-            ema20 = float(
-                current["EMA20"]
-            )
-
-            ema50 = float(
-                current["EMA50"]
-            )
-
-            ema100 = float(
-                current["EMA100"]
-            )
-
-            ema200 = float(
-                current["EMA200"]
-            )
+            close = float(current["Close"])
+            ema20 = float(current["EMA20"])
+            ema50 = float(current["EMA50"])
+            ema100 = float(current["EMA100"])
+            ema200 = float(current["EMA200"])
 
             exit_condition = (
-
                 score <= exit_score
-
-                or
-
-                ema20 < ema50
-
-                or
-
-                close < ema100
-
-                or
-
-                ema50 < ema200
+                or ema20 < ema50
+                or close < ema100
+                or ema50 < ema200
             )
 
             if exit_condition:
-
-                exit_price = (
-                    next_open
-                    *
-                    (1 - cost)
-                )
+                exit_price = next_open * (1 - cost)
 
                 trade_return = (
-                    (
-                        exit_price
-                        /
-                        entry_price
-                    )
-                    - 1
+                    exit_price / entry_price - 1
                 )
 
-                equity *= (
-                    1 + trade_return
-                )
+                equity *= 1 + trade_return
 
-                holding_days = (
-                    next_date
-                    -
-                    entry_date
-                ).days
-
-                trades.append(
-                    {
-
-                        "entry_date":
-                            str(
-                                entry_date.date()
-                            ),
-
-                        "exit_date":
-                            str(
-                                next_date.date()
-                            ),
-
-                        "entry_price":
-                            safe_float(
-                                entry_price,
-                                2,
-                            ),
-
-                        "exit_price":
-                            safe_float(
-                                exit_price,
-                                2,
-                            ),
-
-                        "entry_score":
-                            entry_score_value,
-
-                        "exit_score":
-                            score,
-
-                        "return_pct":
-                            safe_float(
-                                trade_return
-                                *
-                                100,
-                                2,
-                            ),
-
-                        "holding_days":
-                            holding_days,
-                    }
-                )
+                trades.append({
+                    "entry_date": str(entry_date.date()),
+                    "exit_date": str(next_date.date()),
+                    "entry_price": safe_float(entry_price, 2),
+                    "exit_price": safe_float(exit_price, 2),
+                    "entry_score": entry_score_value,
+                    "exit_score": score,
+                    "return_pct": safe_float(
+                        trade_return * 100,
+                        2,
+                    ),
+                    "holding_days": (
+                        next_date - entry_date
+                    ).days,
+                })
 
                 in_position = False
-
                 entry_price = None
-
                 entry_date = None
-
                 entry_score_value = None
 
-    # ========================================================
-    # CLOSE FINAL OPEN TRADE
-    # ========================================================
-
     if in_position:
-
         final = df.iloc[-1]
-
         final_date = df.index[-1]
 
         exit_price = (
             float(final["Close"])
-            *
-            (1 - cost)
+            * (1 - cost)
         )
 
         trade_return = (
-            (
-                exit_price
-                /
-                entry_price
-            )
-            - 1
+            exit_price / entry_price - 1
         )
 
-        equity *= (
-            1 + trade_return
-        )
+        equity *= 1 + trade_return
 
-        trades.append(
-            {
-
-                "entry_date":
-                    str(
-                        entry_date.date()
-                    ),
-
-                "exit_date":
-                    str(
-                        final_date.date()
-                    ),
-
-                "entry_price":
-                    safe_float(
-                        entry_price,
-                        2,
-                    ),
-
-                "exit_price":
-                    safe_float(
-                        exit_price,
-                        2,
-                    ),
-
-                "entry_score":
-                    entry_score_value,
-
-                "exit_score":
-                    safe_int(
-                        final["SCORE"]
-                    ),
-
-                "return_pct":
-                    safe_float(
-                        trade_return * 100,
-                        2,
-                    ),
-
-                "holding_days":
-                    (
-                        final_date
-                        -
-                        entry_date
-                    ).days,
-
-                "forced_exit_at_test_end":
-                    True,
-            }
-        )
+        trades.append({
+            "entry_date": str(entry_date.date()),
+            "exit_date": str(final_date.date()),
+            "entry_price": safe_float(entry_price, 2),
+            "exit_price": safe_float(exit_price, 2),
+            "entry_score": entry_score_value,
+            "exit_score": safe_int(final["SCORE"]),
+            "return_pct": safe_float(
+                trade_return * 100,
+                2,
+            ),
+            "holding_days": (
+                final_date - entry_date
+            ).days,
+            "forced_exit_at_test_end": True,
+        })
 
     returns = [
-
         x["return_pct"]
-
         for x in trades
-
         if x["return_pct"] is not None
     ]
 
-    winners = [
-        x for x in returns
-        if x > 0
-    ]
+    winners = [x for x in returns if x > 0]
+    losers = [x for x in returns if x <= 0]
 
-    losers = [
-        x for x in returns
-        if x <= 0
-    ]
-
-    trade_count = len(
-        trades
-    )
+    trade_count = len(trades)
 
     if trade_count:
-
         win_rate = (
             len(winners)
-            /
-            trade_count
-            *
-            100
+            / trade_count
+            * 100
         )
 
-        avg_trade = np.mean(
-            returns
-        )
+        avg_trade = np.mean(returns)
+        median_trade = np.median(returns)
 
-        median_trade = np.median(
-            returns
-        )
-
-        avg_holding = np.mean(
-            [
-                x["holding_days"]
-                for x in trades
-            ]
-        )
+        avg_holding = np.mean([
+            x["holding_days"]
+            for x in trades
+        ])
 
     else:
-
         win_rate = 0
-
         avg_trade = 0
-
         median_trade = 0
-
         avg_holding = 0
 
-    gross_profit = sum(
-        winners
-    )
-
-    gross_loss = abs(
-        sum(losers)
-    )
+    gross_profit = sum(winners)
+    gross_loss = abs(sum(losers))
 
     if gross_loss > 0:
-
         profit_factor = (
-            gross_profit
-            /
-            gross_loss
+            gross_profit / gross_loss
         )
-
     elif gross_profit > 0:
-
         profit_factor = None
-
     else:
-
         profit_factor = 0
 
     total_return = (
         equity - 1
     ) * 100
 
-    first_open = float(
-        df.iloc[0]["Open"]
-    )
-
-    last_close = float(
-        df.iloc[-1]["Close"]
-    )
+    first_open = float(df.iloc[0]["Open"])
+    last_close = float(df.iloc[-1]["Close"])
 
     buy_hold_return = (
-        (
-            last_close
-            /
-            first_open
-        )
-        - 1
+        last_close / first_open - 1
     ) * 100
 
-    # ========================================================
-    # TRADE-LEVEL DRAWDOWN
-    # ========================================================
-
     running_equity = 1.0
-
     peak = 1.0
-
     max_drawdown = 0
 
     for trade in trades:
-
         running_equity *= (
             1
-            +
-            trade["return_pct"]
-            /
-            100
+            + trade["return_pct"] / 100
         )
 
-        peak = max(
-            peak,
-            running_equity,
-        )
+        peak = max(peak, running_equity)
 
         drawdown = (
-            (
-                running_equity
-                /
-                peak
-            )
-            - 1
+            running_equity / peak - 1
         ) * 100
 
         max_drawdown = min(
@@ -1570,116 +709,961 @@ def run_backtest(
         )
 
     start_date = df.index[0]
-
     end_date = df.index[-1]
 
     elapsed_years = (
-        (
-            end_date
-            -
-            start_date
-        ).days
-        /
-        365.25
+        (end_date - start_date).days
+        / 365.25
     )
 
-    if (
-        elapsed_years > 0
-        and equity > 0
-    ):
-
+    if elapsed_years > 0 and equity > 0:
         cagr = (
-            equity
-            **
-            (
-                1
-                /
-                elapsed_years
-            )
+            equity ** (1 / elapsed_years)
             - 1
         ) * 100
-
     else:
-
         cagr = None
 
     return {
-
-        "model":
-            MODEL_NAME,
-
-        "symbol":
-            symbol,
-
-        "commodity":
-            ASSETS[symbol][
-                "tr_name"
-            ],
-
-        "group":
-            ASSETS[symbol][
-                "group"
-            ],
+        "model": MODEL_NAME,
+        "symbol": symbol,
+        "commodity": ASSETS[symbol]["tr_name"],
+        "group": ASSETS[symbol]["group"],
 
         "test_period": {
-
-            "start":
-                str(
-                    start_date.date()
-                ),
-
-            "end":
-                str(
-                    end_date.date()
-                ),
-
-            "years_requested":
-                years,
+            "start": str(start_date.date()),
+            "end": str(end_date.date()),
+            "years_requested": years,
         },
 
         "settings": {
-
-            "entry_score":
-                entry_score,
-
-            "exit_score":
-                exit_score,
-
+            "entry_score": entry_score,
+            "exit_score": exit_score,
             "transaction_cost_pct_each_side":
                 transaction_cost_pct,
-
             "execution":
                 "Signal at close, next trading day open",
-
             "exit_model":
                 "V1.2A_SLOW_EXIT",
-
             "exit_rules": [
                 "score <= exit_score",
                 "EMA20 < EMA50",
                 "Close < EMA100",
                 "EMA50 < EMA200",
             ],
-
-            "long_only":
-                True,
-
-            "short":
-                False,
-
-            "leverage":
-                False,
+            "long_only": True,
+            "short": False,
+            "leverage": False,
         },
 
         "performance": {
+            "trade_count": trade_count,
+            "win_rate_pct": safe_float(win_rate, 2),
+            "average_trade_pct": safe_float(avg_trade, 2),
+            "median_trade_pct": safe_float(median_trade, 2),
+            "average_holding_days":
+                safe_float(avg_holding, 1),
+            "profit_factor":
+                safe_float(profit_factor, 3),
+            "strategy_total_return_pct":
+                safe_float(total_return, 2),
+            "strategy_cagr_pct":
+                safe_float(cagr, 2),
+            "max_drawdown_trade_level_pct":
+                safe_float(max_drawdown, 2),
+            "buy_hold_return_pct":
+                safe_float(buy_hold_return, 2),
+        },
+
+        "trades": trades,
+        "generated_at_utc": utc_now(),
+    }
+
+
+def run_backtest_all(
+    years=10,
+    entry_score=75,
+    exit_score=50,
+    transaction_cost_pct=0.10,
+):
+    results = []
+    errors = []
+
+    for symbol in ASSETS:
+        try:
+            bt = run_backtest(
+                symbol=symbol,
+                years=years,
+                entry_score=entry_score,
+                exit_score=exit_score,
+                transaction_cost_pct=
+                    transaction_cost_pct,
+            )
+
+            p = bt["performance"]
+
+            results.append({
+                "symbol": symbol,
+                "commodity":
+                    ASSETS[symbol]["tr_name"],
+                "group":
+                    ASSETS[symbol]["group"],
+                "trade_count":
+                    p["trade_count"],
+                "win_rate_pct":
+                    p["win_rate_pct"],
+                "profit_factor":
+                    p["profit_factor"],
+                "average_trade_pct":
+                    p["average_trade_pct"],
+                "median_trade_pct":
+                    p["median_trade_pct"],
+                "average_holding_days":
+                    p["average_holding_days"],
+                "strategy_total_return_pct":
+                    p["strategy_total_return_pct"],
+                "strategy_cagr_pct":
+                    p["strategy_cagr_pct"],
+                "max_drawdown_pct":
+                    p["max_drawdown_trade_level_pct"],
+                "buy_hold_return_pct":
+                    p["buy_hold_return_pct"],
+            })
+
+        except Exception as exc:
+            errors.append({
+                "symbol": symbol,
+                "error": str(exc),
+            })
+
+    def pf_sort_value(item):
+        pf = item["profit_factor"]
+        return -999999 if pf is None else pf
+
+    results = sorted(
+        results,
+        key=pf_sort_value,
+        reverse=True,
+    )
+
+    for index, item in enumerate(
+        results,
+        start=1,
+    ):
+        item["backtest_rank"] = index
+
+    profitable_count = sum(
+        1
+        for item in results
+        if (
+            item["strategy_total_return_pct"]
+            is not None
+            and
+            item["strategy_total_return_pct"] > 0
+        )
+    )
+
+    pf_above_one_count = sum(
+        1
+        for item in results
+        if (
+            item["profit_factor"]
+            is not None
+            and
+            item["profit_factor"] > 1
+        )
+    )
+
+    beat_buy_hold_count = sum(
+        1
+        for item in results
+        if (
+            item["strategy_total_return_pct"]
+            is not None
+            and
+            item["buy_hold_return_pct"]
+            is not None
+            and
+            item["strategy_total_return_pct"]
+            >
+            item["buy_hold_return_pct"]
+        )
+    )
+
+    return {
+        "model": MODEL_NAME,
+        "test": "BACKTEST_ALL",
+        "generated_at_utc": utc_now(),
+
+        "settings": {
+            "years": years,
+            "entry_score": entry_score,
+            "exit_score": exit_score,
+            "transaction_cost_pct_each_side":
+                transaction_cost_pct,
+            "execution":
+                "Signal at close, next trading day open",
+            "exit_model":
+                "V1.2A_SLOW_EXIT",
+            "long_only": True,
+            "short": False,
+            "leverage": False,
+        },
+
+        "summary": {
+            "asset_count_tested":
+                len(results),
+            "error_count":
+                len(errors),
+            "profitable_strategy_count":
+                profitable_count,
+            "profit_factor_above_1_count":
+                pf_above_one_count,
+            "strategy_beats_buy_hold_count":
+                beat_buy_hold_count,
+        },
+
+        "results": results,
+        "errors": errors,
+    }
+
+
+# ============================================================
+# V1.2B PORTFOLIO ROTATION
+# ============================================================
+
+def prepare_rotation_data(years=10):
+    prepared = {}
+    errors = []
+
+    for symbol in ASSETS:
+        try:
+            df = download_history(
+                symbol,
+                f"{years}y",
+            )
+
+            df = calculate_indicators(df)
+            df = df.dropna().copy()
+
+            scores = []
+            signals = []
+
+            for _, row in df.iterrows():
+                score, _, _ = calculate_score(row)
+
+                scores.append(score)
+                signals.append(
+                    determine_signal(
+                        row,
+                        score,
+                    )
+                )
+
+            df["SCORE"] = scores
+            df["MODEL_SIGNAL"] = signals
+
+            prepared[symbol] = df
+
+        except Exception as exc:
+            errors.append({
+                "symbol": symbol,
+                "error": str(exc),
+            })
+
+    if not prepared:
+        raise ValueError(
+            "Rotation backtest için veri hazırlanamadı."
+        )
+
+    common_dates = None
+
+    for df in prepared.values():
+        dates = set(df.index)
+
+        if common_dates is None:
+            common_dates = dates
+        else:
+            common_dates = (
+                common_dates.intersection(dates)
+            )
+
+    common_dates = sorted(common_dates)
+
+    if len(common_dates) < 250:
+        raise ValueError(
+            "Rotation backtest için yeterli ortak tarih yok."
+        )
+
+    return prepared, common_dates, errors
+
+
+def rotation_candidates(
+    prepared,
+    signal_date,
+    entry_score,
+):
+    candidates = []
+
+    for symbol, df in prepared.items():
+
+        if signal_date not in df.index:
+            continue
+
+        row = df.loc[signal_date]
+
+        score = int(row["SCORE"])
+        signal = row["MODEL_SIGNAL"]
+
+        if (
+            score >= entry_score
+            and signal == "AL_ADAYI"
+        ):
+            candidates.append({
+                "symbol": symbol,
+                "score": score,
+                "mom120":
+                    float(row["MOM120"]),
+                "mom60":
+                    float(row["MOM60"]),
+                "mom20":
+                    float(row["MOM20"]),
+            })
+
+    candidates.sort(
+        key=lambda x: (
+            x["score"],
+            x["mom120"],
+            x["mom60"],
+            x["mom20"],
+        ),
+        reverse=True,
+    )
+
+    return candidates
+
+
+def rotation_exit_required(
+    row,
+    exit_score,
+):
+    return (
+        int(row["SCORE"]) <= exit_score
+        or
+        float(row["EMA20"])
+        <
+        float(row["EMA50"])
+        or
+        float(row["Close"])
+        <
+        float(row["EMA100"])
+        or
+        float(row["EMA50"])
+        <
+        float(row["EMA200"])
+    )
+
+
+def run_rotation_variant(
+    prepared,
+    common_dates,
+    top_n,
+    entry_score,
+    exit_score,
+    transaction_cost_pct,
+):
+    cost = transaction_cost_pct / 100
+
+    equity = 1.0
+    peak = 1.0
+    max_drawdown = 0.0
+
+    holdings = {}
+
+    trades = []
+    rebalances = []
+    equity_curve = []
+
+    cash_days = 0
+    invested_days = 0
+    rotation_count = 0
+    entry_count = 0
+    exit_count = 0
+
+    for i in range(len(common_dates) - 1):
+
+        signal_date = common_dates[i]
+        next_date = common_dates[i + 1]
+
+        # ------------------------------------------
+        # CURRENT OPEN -> NEXT OPEN MARK TO MARKET
+        # ------------------------------------------
+
+        if holdings:
+            weight = 1.0 / top_n
+            daily_return = 0.0
+
+            for symbol in holdings:
+                df = prepared[symbol]
+
+                current_open = float(
+                    df.loc[
+                        signal_date,
+                        "Open",
+                    ]
+                )
+
+                next_open = float(
+                    df.loc[
+                        next_date,
+                        "Open",
+                    ]
+                )
+
+                if current_open > 0:
+                    daily_return += (
+                        next_open
+                        /
+                        current_open
+                        - 1
+                    ) * weight
+
+            equity *= (
+                1 + daily_return
+            )
+
+        # ------------------------------------------
+        # CLOSE SIGNAL
+        # ------------------------------------------
+
+        candidates = rotation_candidates(
+            prepared,
+            signal_date,
+            entry_score,
+        )
+
+        ranked_symbols = [
+            x["symbol"]
+            for x in candidates
+        ]
+
+        desired = ranked_symbols[:top_n]
+
+        survivors = []
+
+        for symbol in holdings:
+            row = prepared[symbol].loc[
+                signal_date
+            ]
+
+            must_exit = (
+                rotation_exit_required(
+                    row,
+                    exit_score,
+                )
+            )
+
+            if (
+                not must_exit
+                and symbol in desired
+            ):
+                survivors.append(symbol)
+
+        next_symbols = []
+
+        for symbol in desired:
+            if symbol in survivors:
+                next_symbols.append(symbol)
+            else:
+                next_symbols.append(symbol)
+
+        old_symbols = list(
+            holdings.keys()
+        )
+
+        exiting = [
+            x
+            for x in old_symbols
+            if x not in next_symbols
+        ]
+
+        entering = [
+            x
+            for x in next_symbols
+            if x not in old_symbols
+        ]
+
+        # ------------------------------------------
+        # COSTS
+        # ------------------------------------------
+
+        sides = (
+            len(exiting)
+            +
+            len(entering)
+        )
+
+        if sides:
+            equity *= (
+                1
+                -
+                cost
+                *
+                sides
+                /
+                top_n
+            )
+
+        # ------------------------------------------
+        # CLOSE TRADES
+        # ------------------------------------------
+
+        for symbol in exiting:
+            old = holdings[symbol]
+
+            entry_date = old["entry_date"]
+
+            entry_open = float(
+                prepared[symbol].loc[
+                    entry_date,
+                    "Open",
+                ]
+            )
+
+            exit_open = float(
+                prepared[symbol].loc[
+                    next_date,
+                    "Open",
+                ]
+            )
+
+            gross = (
+                exit_open / entry_open - 1
+            )
+
+            net = (
+                (1 + gross)
+                *
+                (1 - cost)
+                *
+                (1 - cost)
+                - 1
+            )
+
+            trades.append({
+                "symbol": symbol,
+                "entry_date":
+                    str(entry_date.date()),
+                "exit_date":
+                    str(next_date.date()),
+                "entry_score":
+                    old["entry_score"],
+                "exit_score":
+                    safe_int(
+                        prepared[symbol]
+                        .loc[
+                            signal_date,
+                            "SCORE",
+                        ]
+                    ),
+                "return_pct":
+                    safe_float(
+                        net * 100,
+                        2,
+                    ),
+                "holding_days":
+                    (
+                        next_date
+                        -
+                        entry_date
+                    ).days,
+            })
+
+            exit_count += 1
+
+        # ------------------------------------------
+        # NEW HOLDINGS
+        # ------------------------------------------
+
+        new_holdings = {}
+
+        for symbol in next_symbols:
+
+            if symbol in holdings:
+                new_holdings[symbol] = (
+                    holdings[symbol]
+                )
+
+            else:
+                score = int(
+                    prepared[symbol]
+                    .loc[
+                        signal_date,
+                        "SCORE",
+                    ]
+                )
+
+                new_holdings[symbol] = {
+                    "entry_date":
+                        next_date,
+                    "entry_score":
+                        score,
+                }
+
+                entry_count += 1
+
+        if (
+            old_symbols
+            and next_symbols
+            and set(old_symbols)
+            !=
+            set(next_symbols)
+        ):
+            rotation_count += 1
+
+        if sides:
+            rebalances.append({
+                "signal_date":
+                    str(signal_date.date()),
+                "execution_date":
+                    str(next_date.date()),
+                "from":
+                    old_symbols
+                    if old_symbols
+                    else ["CASH"],
+                "to":
+                    next_symbols
+                    if next_symbols
+                    else ["CASH"],
+                "transaction_sides":
+                    sides,
+            })
+
+        holdings = new_holdings
+
+        if holdings:
+            invested_days += 1
+        else:
+            cash_days += 1
+
+        peak = max(
+            peak,
+            equity,
+        )
+
+        drawdown = (
+            equity / peak - 1
+        ) * 100
+
+        max_drawdown = min(
+            max_drawdown,
+            drawdown,
+        )
+
+        equity_curve.append({
+            "date":
+                str(next_date.date()),
+            "equity":
+                safe_float(
+                    equity,
+                    6,
+                ),
+            "drawdown_pct":
+                safe_float(
+                    drawdown,
+                    2,
+                ),
+            "holdings":
+                list(holdings.keys())
+                if holdings
+                else ["CASH"],
+        })
+
+    # ========================================================
+    # FINAL CLOSE
+    # ========================================================
+
+    final_date = common_dates[-1]
+
+    if holdings:
+
+        weight = 1.0 / top_n
+        final_day_return = 0.0
+
+        for symbol in holdings:
+            df = prepared[symbol]
+
+            final_open = float(
+                df.loc[
+                    final_date,
+                    "Open",
+                ]
+            )
+
+            final_close = float(
+                df.loc[
+                    final_date,
+                    "Close",
+                ]
+            )
+
+            if final_open > 0:
+                final_day_return += (
+                    final_close
+                    /
+                    final_open
+                    - 1
+                ) * weight
+
+        equity *= (
+            1 + final_day_return
+        )
+
+        equity *= (
+            1
+            -
+            cost
+            *
+            len(holdings)
+            /
+            top_n
+        )
+
+        for symbol, old in holdings.items():
+
+            entry_date = old["entry_date"]
+
+            entry_open = float(
+                prepared[symbol]
+                .loc[
+                    entry_date,
+                    "Open",
+                ]
+            )
+
+            final_close = float(
+                prepared[symbol]
+                .loc[
+                    final_date,
+                    "Close",
+                ]
+            )
+
+            gross = (
+                final_close
+                /
+                entry_open
+                - 1
+            )
+
+            net = (
+                (1 + gross)
+                *
+                (1 - cost)
+                *
+                (1 - cost)
+                - 1
+            )
+
+            trades.append({
+                "symbol": symbol,
+                "entry_date":
+                    str(entry_date.date()),
+                "exit_date":
+                    str(final_date.date()),
+                "entry_score":
+                    old["entry_score"],
+                "exit_score":
+                    safe_int(
+                        prepared[symbol]
+                        .loc[
+                            final_date,
+                            "SCORE",
+                        ]
+                    ),
+                "return_pct":
+                    safe_float(
+                        net * 100,
+                        2,
+                    ),
+                "holding_days":
+                    (
+                        final_date
+                        -
+                        entry_date
+                    ).days,
+                "forced_exit_at_test_end":
+                    True,
+            })
+
+            exit_count += 1
+
+        peak = max(
+            peak,
+            equity,
+        )
+
+        drawdown = (
+            equity / peak - 1
+        ) * 100
+
+        max_drawdown = min(
+            max_drawdown,
+            drawdown,
+        )
+
+    returns = [
+        x["return_pct"]
+        for x in trades
+        if x["return_pct"] is not None
+    ]
+
+    winners = [
+        x
+        for x in returns
+        if x > 0
+    ]
+
+    losers = [
+        x
+        for x in returns
+        if x <= 0
+    ]
+
+    if returns:
+        win_rate = (
+            len(winners)
+            /
+            len(returns)
+            *
+            100
+        )
+
+        avg_trade = np.mean(returns)
+        median_trade = np.median(returns)
+
+        avg_holding = np.mean([
+            x["holding_days"]
+            for x in trades
+        ])
+
+    else:
+        win_rate = 0
+        avg_trade = 0
+        median_trade = 0
+        avg_holding = 0
+
+    gross_profit = sum(winners)
+    gross_loss = abs(sum(losers))
+
+    if gross_loss > 0:
+        profit_factor = (
+            gross_profit
+            /
+            gross_loss
+        )
+
+    elif gross_profit > 0:
+        profit_factor = None
+
+    else:
+        profit_factor = 0
+
+    start_date = common_dates[0]
+    end_date = common_dates[-1]
+
+    elapsed_years = (
+        (end_date - start_date).days
+        /
+        365.25
+    )
+
+    total_return = (
+        equity - 1
+    ) * 100
+
+    if (
+        elapsed_years > 0
+        and equity > 0
+    ):
+        cagr = (
+            equity
+            **
+            (1 / elapsed_years)
+            - 1
+        ) * 100
+
+    else:
+        cagr = None
+
+    active_days = (
+        cash_days
+        +
+        invested_days
+    )
+
+    cash_pct = (
+        cash_days
+        /
+        active_days
+        *
+        100
+        if active_days
+        else 0
+    )
+
+    invested_pct = (
+        invested_days
+        /
+        active_days
+        *
+        100
+        if active_days
+        else 0
+    )
+
+    return {
+        "portfolio":
+            f"TOP_{top_n}",
+
+        "slots":
+            top_n,
+
+        "weighting":
+            "EQUAL_WEIGHT",
+
+        "performance": {
+            "strategy_total_return_pct":
+                safe_float(
+                    total_return,
+                    2,
+                ),
+
+            "strategy_cagr_pct":
+                safe_float(
+                    cagr,
+                    2,
+                ),
+
+            "max_drawdown_daily_pct":
+                safe_float(
+                    max_drawdown,
+                    2,
+                ),
 
             "trade_count":
-                trade_count,
+                len(trades),
 
             "win_rate_pct":
                 safe_float(
                     win_rate,
                     2,
+                ),
+
+            "profit_factor":
+                safe_float(
+                    profit_factor,
+                    3,
                 ),
 
             "average_trade_pct":
@@ -1700,251 +1684,134 @@ def run_backtest(
                     1,
                 ),
 
-            "profit_factor":
-                safe_float(
-                    profit_factor,
-                    3,
-                ),
+            "entry_count":
+                entry_count,
 
-            "strategy_total_return_pct":
+            "exit_count":
+                exit_count,
+
+            "rotation_count":
+                rotation_count,
+
+            "cash_days":
+                cash_days,
+
+            "cash_time_pct":
                 safe_float(
-                    total_return,
+                    cash_pct,
                     2,
                 ),
 
-            "strategy_cagr_pct":
+            "invested_time_pct":
                 safe_float(
-                    cagr,
+                    invested_pct,
                     2,
                 ),
 
-            "max_drawdown_trade_level_pct":
+            "final_equity":
                 safe_float(
-                    max_drawdown,
-                    2,
-                ),
-
-            "buy_hold_return_pct":
-                safe_float(
-                    buy_hold_return,
-                    2,
+                    equity,
+                    6,
                 ),
         },
 
         "trades":
             trades,
 
-        "generated_at_utc":
-            utc_now(),
+        "rebalances":
+            rebalances,
+
+        "equity_curve":
+            equity_curve,
     }
 
 
-# ============================================================
-# BACKTEST ALL
-# ============================================================
-
-def run_backtest_all(
+def run_rotation_backtest(
     years=10,
     entry_score=75,
     exit_score=50,
     transaction_cost_pct=0.10,
 ):
-
-    results = []
-
-    errors = []
-
-    for symbol in ASSETS:
-
-        try:
-
-            bt = run_backtest(
-                symbol=symbol,
-                years=years,
-                entry_score=entry_score,
-                exit_score=exit_score,
-                transaction_cost_pct=transaction_cost_pct,
-            )
-
-            performance = bt[
-                "performance"
-            ]
-
-            results.append(
-                {
-
-                    "symbol":
-                        symbol,
-
-                    "commodity":
-                        ASSETS[symbol][
-                            "tr_name"
-                        ],
-
-                    "group":
-                        ASSETS[symbol][
-                            "group"
-                        ],
-
-                    "trade_count":
-                        performance[
-                            "trade_count"
-                        ],
-
-                    "win_rate_pct":
-                        performance[
-                            "win_rate_pct"
-                        ],
-
-                    "profit_factor":
-                        performance[
-                            "profit_factor"
-                        ],
-
-                    "average_trade_pct":
-                        performance[
-                            "average_trade_pct"
-                        ],
-
-                    "median_trade_pct":
-                        performance[
-                            "median_trade_pct"
-                        ],
-
-                    "average_holding_days":
-                        performance[
-                            "average_holding_days"
-                        ],
-
-                    "strategy_total_return_pct":
-                        performance[
-                            "strategy_total_return_pct"
-                        ],
-
-                    "strategy_cagr_pct":
-                        performance[
-                            "strategy_cagr_pct"
-                        ],
-
-                    "max_drawdown_pct":
-                        performance[
-                            "max_drawdown_trade_level_pct"
-                        ],
-
-                    "buy_hold_return_pct":
-                        performance[
-                            "buy_hold_return_pct"
-                        ],
-                }
-            )
-
-        except Exception as exc:
-
-            errors.append(
-                {
-                    "symbol": symbol,
-                    "error": str(exc),
-                }
-            )
-
-    # Sadece raporlama kolaylığı için PF sırası
-
-    def pf_sort_value(item):
-
-        pf = item[
-            "profit_factor"
-        ]
-
-        if pf is None:
-
-            return -999999
-
-        return pf
-
-    results = sorted(
-        results,
-        key=pf_sort_value,
-        reverse=True,
+    prepared, common_dates, errors = (
+        prepare_rotation_data(years)
     )
 
-    for index, item in enumerate(
-        results,
-        start=1,
-    ):
-
-        item[
-            "backtest_rank"
-        ] = index
-
-    profitable_count = sum(
-        1
-        for item in results
-        if (
-            item[
-                "strategy_total_return_pct"
-            ]
-            is not None
-            and
-            item[
-                "strategy_total_return_pct"
-            ] > 0
-        )
+    top1 = run_rotation_variant(
+        prepared=prepared,
+        common_dates=common_dates,
+        top_n=1,
+        entry_score=entry_score,
+        exit_score=exit_score,
+        transaction_cost_pct=
+            transaction_cost_pct,
     )
 
-    pf_above_one_count = sum(
-        1
-        for item in results
-        if (
-            item[
-                "profit_factor"
-            ]
-            is not None
-            and
-            item[
-                "profit_factor"
-            ] > 1
-        )
+    top2 = run_rotation_variant(
+        prepared=prepared,
+        common_dates=common_dates,
+        top_n=2,
+        entry_score=entry_score,
+        exit_score=exit_score,
+        transaction_cost_pct=
+            transaction_cost_pct,
     )
 
-    beat_buy_hold_count = sum(
-        1
-        for item in results
-        if (
-            item[
-                "strategy_total_return_pct"
-            ]
-            is not None
-            and
-            item[
-                "buy_hold_return_pct"
-            ]
-            is not None
-            and
-            item[
-                "strategy_total_return_pct"
-            ]
-            >
-            item[
-                "buy_hold_return_pct"
+    dbc_return = None
+
+    if "DBC" in prepared:
+        dbc = prepared["DBC"]
+
+        first_date = common_dates[0]
+        last_date = common_dates[-1]
+
+        first_open = float(
+            dbc.loc[
+                first_date,
+                "Open",
             ]
         )
-    )
+
+        last_close = float(
+            dbc.loc[
+                last_date,
+                "Close",
+            ]
+        )
+
+        if first_open > 0:
+            dbc_return = (
+                last_close
+                /
+                first_open
+                - 1
+            ) * 100
 
     return {
-
-        "model":
-            MODEL_NAME,
+        "model": MODEL_NAME,
 
         "test":
-            "BACKTEST_ALL",
+            "PORTFOLIO_ROTATION_BACKTEST",
 
         "generated_at_utc":
             utc_now(),
 
-        "settings": {
+        "test_period": {
+            "start":
+                str(common_dates[0].date()),
 
-            "years":
+            "end":
+                str(common_dates[-1].date()),
+
+            "years_requested":
                 years,
+
+            "common_trading_days":
+                len(common_dates),
+        },
+
+        "settings": {
+            "universe":
+                list(ASSETS.keys()),
 
             "entry_score":
                 entry_score,
@@ -1955,18 +1822,25 @@ def run_backtest_all(
             "transaction_cost_pct_each_side":
                 transaction_cost_pct,
 
+            "ranking":
+                "SCORE, then MOM120, MOM60, MOM20",
+
+            "eligibility":
+                "AL_ADAYI and score >= entry_score",
+
+            "portfolio_variants": [
+                "TOP_1",
+                "TOP_2_EQUAL_WEIGHT",
+            ],
+
+            "cash_rule":
+                "Eligible candidate yoksa CASH",
+
             "execution":
-                "Signal at close, next trading day open",
+                "Signal at close, rebalance next trading day open",
 
             "exit_model":
                 "V1.2A_SLOW_EXIT",
-
-            "exit_rules": [
-                "score <= exit_score",
-                "EMA20 < EMA50",
-                "Close < EMA100",
-                "EMA50 < EMA200",
-            ],
 
             "long_only":
                 True,
@@ -1976,65 +1850,48 @@ def run_backtest_all(
 
             "leverage":
                 False,
+
+            "automatic_orders":
+                False,
         },
 
-        "summary": {
+        "benchmark_reference": {
+            "symbol":
+                "DBC",
 
-            "asset_count_tested":
-                len(results),
-
-            "error_count":
-                len(errors),
-
-            "profitable_strategy_count":
-                profitable_count,
-
-            "profit_factor_above_1_count":
-                pf_above_one_count,
-
-            "strategy_beats_buy_hold_count":
-                beat_buy_hold_count,
+            "buy_hold_return_pct":
+                safe_float(
+                    dbc_return,
+                    2,
+                ),
         },
 
-        "results":
-            results,
+        "top_1":
+            top1,
 
-        "errors":
+        "top_2":
+            top2,
+
+        "data_errors":
             errors,
     }
 
 
 # ============================================================
-# API ENDPOINTS
+# API
 # ============================================================
 
 @app.get("/")
 def root():
-
     return {
-
-        "status":
-            "online",
-
-        "project":
-            "Commodity Rotation Bot",
-
-        "model":
-            MODEL_NAME,
-
-        "mode":
-            "LONG_ONLY_MANUAL_EXECUTION",
-
-        "asset_count":
-            len(ASSETS),
-
-        "tracked_assets":
-            list(
-                ASSETS.keys()
-            ),
+        "status": "online",
+        "project": "Commodity Rotation Bot",
+        "model": MODEL_NAME,
+        "mode": "LONG_ONLY_MANUAL_EXECUTION",
+        "asset_count": len(ASSETS),
+        "tracked_assets": list(ASSETS.keys()),
 
         "endpoints": {
-
             "health":
                 "/health",
 
@@ -2043,6 +1900,9 @@ def root():
 
             "scan":
                 "/scan",
+
+            "rotation_backtest":
+                "/rotation-backtest?years=10",
 
             "backtest_all":
                 "/backtest-all?years=10",
@@ -2067,50 +1927,29 @@ def root():
 
 @app.get("/health")
 def health():
-
     return {
-
-        "status":
-            "ok",
-
-        "model":
-            MODEL_NAME,
-
-        "asset_count":
-            len(ASSETS),
-
-        "time_utc":
-            utc_now(),
+        "status": "ok",
+        "model": MODEL_NAME,
+        "asset_count": len(ASSETS),
+        "time_utc": utc_now(),
     }
 
 
 @app.get("/assets")
 def assets():
-
     return {
-
-        "model":
-            MODEL_NAME,
-
-        "count":
-            len(ASSETS),
-
-        "assets":
-            ASSETS,
+        "model": MODEL_NAME,
+        "count": len(ASSETS),
+        "assets": ASSETS,
     }
 
 
 @app.get("/analyze/{symbol}")
 def analyze(symbol: str):
-
     try:
-
-        return analyze_symbol(
-            symbol
-        )
+        return analyze_symbol(symbol)
 
     except Exception as exc:
-
         raise HTTPException(
             status_code=400,
             detail=str(exc),
@@ -2119,54 +1958,84 @@ def analyze(symbol: str):
 
 @app.get("/scan")
 def scan():
-
     return scan_all_assets()
 
 
-# ============================================================
 # IMPORTANT:
-# /backtest-all MUST BE ABOVE /backtest/{symbol}
-# ============================================================
+# STATIC ROUTES MUST BE ABOVE /backtest/{symbol}
 
-@app.get("/backtest-all")
-def backtest_all(
-
+@app.get("/rotation-backtest")
+def rotation_backtest(
     years: int = Query(
         10,
         ge=2,
         le=20,
     ),
-
     entry_score: int = Query(
         75,
         ge=50,
         le=100,
     ),
-
     exit_score: int = Query(
         50,
         ge=0,
         le=80,
     ),
-
     transaction_cost_pct: float = Query(
         0.10,
         ge=0,
         le=2,
     ),
 ):
-
     try:
+        return run_rotation_backtest(
+            years=years,
+            entry_score=entry_score,
+            exit_score=exit_score,
+            transaction_cost_pct=
+                transaction_cost_pct,
+        )
 
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
+
+
+@app.get("/backtest-all")
+def backtest_all(
+    years: int = Query(
+        10,
+        ge=2,
+        le=20,
+    ),
+    entry_score: int = Query(
+        75,
+        ge=50,
+        le=100,
+    ),
+    exit_score: int = Query(
+        50,
+        ge=0,
+        le=80,
+    ),
+    transaction_cost_pct: float = Query(
+        0.10,
+        ge=0,
+        le=2,
+    ),
+):
+    try:
         return run_backtest_all(
             years=years,
             entry_score=entry_score,
             exit_score=exit_score,
-            transaction_cost_pct=transaction_cost_pct,
+            transaction_cost_pct=
+                transaction_cost_pct,
         )
 
     except Exception as exc:
-
         raise HTTPException(
             status_code=400,
             detail=str(exc),
@@ -2175,36 +2044,29 @@ def backtest_all(
 
 @app.get("/backtest/{symbol}")
 def backtest(
-
     symbol: str,
-
     years: int = Query(
         10,
         ge=2,
         le=20,
     ),
-
     entry_score: int = Query(
         75,
         ge=50,
         le=100,
     ),
-
     exit_score: int = Query(
         50,
         ge=0,
         le=80,
     ),
-
     transaction_cost_pct: float = Query(
         0.10,
         ge=0,
         le=2,
     ),
 ):
-
     try:
-
         return run_backtest(
             symbol,
             years,
@@ -2214,7 +2076,6 @@ def backtest(
         )
 
     except Exception as exc:
-
         raise HTTPException(
             status_code=400,
             detail=str(exc),
@@ -2240,7 +2101,6 @@ def dashboard():
 <title>Commodity Rotation Bot</title>
 
 <style>
-
 body {
     font-family: Arial, sans-serif;
     max-width: 1100px;
@@ -2261,23 +2121,62 @@ a {
     margin: 8px 0;
     font-size: 17px;
 }
-
 </style>
+
 </head>
 
 <body>
 
-<h1>
-Commodity Rotation Bot v1.2A
-</h1>
+<h1>Commodity Rotation Bot v1.2B</h1>
 
 <p>
 Long-only commodity ETF/ETP scanner
 </p>
 
 <p>
-V1.2A - Slow Exit Backtest
+V1.2B - Portfolio Rotation
 </p>
+
+
+<div class="card">
+
+<h2>PORTFOLIO ROTATION</h2>
+
+<a href="/rotation-backtest?years=10">
+Top-1 + Top-2 Rotation - 10 Yıl
+</a>
+
+<a href="/rotation-backtest?years=5">
+Top-1 + Top-2 Rotation - 5 Yıl
+</a>
+
+<a href="/rotation-backtest?years=3">
+Top-1 + Top-2 Rotation - 3 Yıl
+</a>
+
+</div>
+
+
+<div class="card">
+
+<h2>TARAMA</h2>
+
+<a href="/scan">
+Tüm Emtiaları Tara
+</a>
+
+</div>
+
+
+<div class="card">
+
+<h2>BACKTEST ALL</h2>
+
+<a href="/backtest-all?years=10">
+10 Emtia - 10 Yıllık Toplu Backtest
+</a>
+
+</div>
 
 
 <div class="card">
@@ -2350,28 +2249,6 @@ Geniş Emtia Sepeti - DBC
 
 <div class="card">
 
-<h2>TARAMA</h2>
-
-<a href="/scan">
-Tüm Emtiaları Tara
-</a>
-
-</div>
-
-
-<div class="card">
-
-<h2>BACKTEST ALL</h2>
-
-<a href="/backtest-all?years=10">
-10 Emtia - 10 Yıllık Toplu Backtest
-</a>
-
-</div>
-
-
-<div class="card">
-
 <h2>TEKLİ BACKTEST</h2>
 
 <a href="/backtest/GLD?years=10">
@@ -2415,7 +2292,6 @@ Geniş Emtia Sepeti 10 yıl
 </a>
 
 </div>
-
 
 </body>
 </html>
