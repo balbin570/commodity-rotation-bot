@@ -4352,3 +4352,1563 @@ DBC
     return HTMLResponse(
         content=html
     )
+
+# ============================================================
+# V1.3 EXPERIMENT
+# 3-DAY ENTRY CONFIRMATION
+#
+# IMPORTANT:
+# - V1.2D BASELINE IS NOT CHANGED
+# - SCORE MODEL IS NOT CHANGED
+# - ENTRY SCORE = 75
+# - EXIT SCORE = 50
+# - V1.2A SLOW EXIT IS NOT CHANGED
+# - V1.2C STICKY ROTATION IS NOT CHANGED
+# - ASSET UNIVERSE IS NOT CHANGED
+# - RANKING IS NOT CHANGED
+# - COSTS ARE NOT CHANGED
+# - SIGNAL CLOSE -> EXECUTION NEXT OPEN
+#
+# ONLY EXPERIMENTAL CHANGE:
+# A NEW POSITION CAN BE OPENED ONLY IF THE ASSET
+# HAS BEEN "AL_ADAYI" FOR 3 CONSECUTIVE TRADING DAYS.
+#
+# EXISTING HOLDINGS DO NOT NEED TO REMAIN CONFIRMED.
+# THEY CONTINUE UNTIL THE NORMAL V1.2A SLOW EXIT.
+# ============================================================
+
+
+V13_MODEL_NAME = "COMMODITY-ROTATION-V1.3-EXPERIMENT-CONFIRM3"
+
+V13_CONFIRMATION_DAYS = 3
+
+
+# ============================================================
+# BUILD V1.3 CONFIRMED DATA
+# ============================================================
+
+def build_v13_confirmed_prepared(
+    prepared,
+    confirmation_days=V13_CONFIRMATION_DAYS,
+):
+
+    confirmed_prepared = {}
+
+    confirmation_days = int(
+        confirmation_days
+    )
+
+    if confirmation_days < 1:
+
+        raise ValueError(
+            "confirmation_days en az 1 olmalı."
+        )
+
+    for symbol, original_df in prepared.items():
+
+        df = original_df.copy()
+
+        # ----------------------------------------
+        # ORIGINAL V1.2D AL_ADAYI STATUS
+        # ----------------------------------------
+
+        original_buy_candidate = (
+            df["MODEL_SIGNAL"]
+            .eq("AL_ADAYI")
+            .astype(int)
+        )
+
+        # ----------------------------------------
+        # CONSECUTIVE CONFIRMATION
+        #
+        # Example confirmation_days = 3:
+        #
+        # Day 1 AL_ADAYI
+        # Day 2 AL_ADAYI
+        # Day 3 AL_ADAYI
+        #
+        # -> Day 3 is confirmed.
+        #
+        # No future information is used.
+        # ----------------------------------------
+
+        rolling_confirmation = (
+            original_buy_candidate
+            .rolling(
+                window=confirmation_days,
+                min_periods=confirmation_days,
+            )
+            .sum()
+        )
+
+        confirmed = (
+            rolling_confirmation
+            >=
+            confirmation_days
+        )
+
+        # ----------------------------------------
+        # SAVE ORIGINAL SIGNAL FOR AUDIT
+        # ----------------------------------------
+
+        df["V12D_ORIGINAL_SIGNAL"] = (
+            df["MODEL_SIGNAL"]
+        )
+
+        df["V13_CONFIRMATION_DAYS"] = (
+            confirmation_days
+        )
+
+        df["V13_ENTRY_CONFIRMED"] = (
+            confirmed
+        )
+
+        # ----------------------------------------
+        # IMPORTANT
+        #
+        # run_rotation_variant() uses MODEL_SIGNAL
+        # only for NEW ENTRY candidate selection.
+        #
+        # Exit logic does NOT depend on MODEL_SIGNAL.
+        # Exit remains:
+        #
+        # score <= exit_score
+        # OR EMA20 < EMA50
+        # OR Close < EMA100
+        # OR EMA50 < EMA200
+        #
+        # Therefore we can safely mask AL_ADAYI
+        # for unconfirmed entry candidates without
+        # changing the frozen exit model.
+        # ----------------------------------------
+
+        df.loc[
+            ~confirmed,
+            "MODEL_SIGNAL",
+        ] = "BEKLE"
+
+        # Confirmed rows keep their original signal.
+        # Since confirmed requires AL_ADAYI on all
+        # confirmation days, current row is AL_ADAYI.
+
+        confirmed_prepared[symbol] = df
+
+    return confirmed_prepared
+
+
+# ============================================================
+# V1.3 NORMAL ROTATION BACKTEST
+# TOP-1 + TOP-2
+# ============================================================
+
+def run_v13_rotation_backtest(
+    years=10,
+    entry_score=75,
+    exit_score=50,
+    transaction_cost_pct=0.10,
+    confirmation_days=V13_CONFIRMATION_DAYS,
+):
+
+    (
+        prepared,
+        common_dates,
+        errors,
+    ) = prepare_rotation_data(
+        years
+    )
+
+    confirmed_prepared = (
+        build_v13_confirmed_prepared(
+            prepared=
+                prepared,
+
+            confirmation_days=
+                confirmation_days,
+        )
+    )
+
+    top1 = run_rotation_variant(
+
+        prepared=
+            confirmed_prepared,
+
+        common_dates=
+            common_dates,
+
+        top_n=
+            1,
+
+        entry_score=
+            entry_score,
+
+        exit_score=
+            exit_score,
+
+        transaction_cost_pct=
+            transaction_cost_pct,
+    )
+
+    top2 = run_rotation_variant(
+
+        prepared=
+            confirmed_prepared,
+
+        common_dates=
+            common_dates,
+
+        top_n=
+            2,
+
+        entry_score=
+            entry_score,
+
+        exit_score=
+            exit_score,
+
+        transaction_cost_pct=
+            transaction_cost_pct,
+    )
+
+    # ----------------------------------------
+    # DBC BUY & HOLD BENCHMARK
+    # SAME PERIOD
+    # ----------------------------------------
+
+    dbc_return = None
+
+    if "DBC" in prepared:
+
+        dbc = prepared["DBC"]
+
+        first_date = (
+            common_dates[0]
+        )
+
+        last_date = (
+            common_dates[-1]
+        )
+
+        first_open = float(
+            dbc.loc[
+                first_date,
+                "Open",
+            ]
+        )
+
+        last_close = float(
+            dbc.loc[
+                last_date,
+                "Close",
+            ]
+        )
+
+        if first_open > 0:
+
+            dbc_return = (
+                last_close
+                /
+                first_open
+                - 1
+            ) * 100
+
+    return {
+
+        "model":
+            V13_MODEL_NAME,
+
+        "test":
+            "V1.3_CONFIRM3_ROTATION_BACKTEST",
+
+        "generated_at_utc":
+            utc_now(),
+
+        "test_period": {
+
+            "start":
+                str(
+                    common_dates[0].date()
+                ),
+
+            "end":
+                str(
+                    common_dates[-1].date()
+                ),
+
+            "years_requested":
+                years,
+
+            "common_trading_days":
+                len(
+                    common_dates
+                ),
+        },
+
+        "experimental_change": {
+
+            "name":
+                "ENTRY_CONFIRMATION",
+
+            "confirmation_days":
+                confirmation_days,
+
+            "rule":
+                (
+                    "New entry requires AL_ADAYI on "
+                    f"{confirmation_days} consecutive closes"
+                ),
+
+            "applies_to":
+                "NEW_ENTRIES_ONLY",
+
+            "existing_holdings":
+                "UNCHANGED_UNTIL_V1.2A_SLOW_EXIT",
+        },
+
+        "frozen_settings": {
+
+            "entry_score":
+                entry_score,
+
+            "exit_score":
+                exit_score,
+
+            "transaction_cost_pct_each_side":
+                transaction_cost_pct,
+
+            "ranking":
+                "SCORE, then MOM120, MOM60, MOM20",
+
+            "base_entry_eligibility":
+                "AL_ADAYI and score >= entry_score",
+
+            "additional_v13_entry_filter":
+                (
+                    f"AL_ADAYI for {confirmation_days} "
+                    "consecutive closes"
+                ),
+
+            "exit_model":
+                "V1.2A_SLOW_EXIT",
+
+            "rotation_model":
+                "V1.2C_STICKY_ROTATION",
+
+            "execution":
+                "Signal at close, next trading day open",
+
+            "parameter_optimization":
+                False,
+
+            "long_only":
+                True,
+
+            "short":
+                False,
+
+            "leverage":
+                False,
+
+            "automatic_orders":
+                False,
+        },
+
+        "benchmark": {
+
+            "symbol":
+                "DBC",
+
+            "buy_hold_return_pct":
+                safe_float(
+                    dbc_return,
+                    2,
+                ),
+        },
+
+        "top_1":
+            top1,
+
+        "top_2":
+            top2,
+
+        "data_errors":
+            errors,
+    }
+
+
+# ============================================================
+# V1.3 CHRONOLOGICAL OOS
+# TOP-2 STICKY
+# SAME SPLITS AS V1.2D
+# ============================================================
+
+def run_v13_oos_walk_forward(
+    years=10,
+    folds=4,
+    initial_train_pct=50,
+    entry_score=75,
+    exit_score=50,
+    transaction_cost_pct=0.10,
+    confirmation_days=V13_CONFIRMATION_DAYS,
+):
+
+    (
+        prepared,
+        common_dates,
+        errors,
+    ) = prepare_rotation_data(
+        years
+    )
+
+    confirmed_prepared = (
+        build_v13_confirmed_prepared(
+            prepared=
+                prepared,
+
+            confirmation_days=
+                confirmation_days,
+        )
+    )
+
+    n = len(
+        common_dates
+    )
+
+    if n < 500:
+
+        raise ValueError(
+            "OOS/walk-forward için yeterli ortak tarih yok."
+        )
+
+    folds = int(
+        folds
+    )
+
+    if folds < 2:
+
+        raise ValueError(
+            "folds en az 2 olmalı."
+        )
+
+    initial_train_pct = int(
+        initial_train_pct
+    )
+
+    if not (
+        30
+        <=
+        initial_train_pct
+        <=
+        80
+    ):
+
+        raise ValueError(
+            "initial_train_pct 30 ile 80 arasında olmalı."
+        )
+
+    train_end = int(
+        n
+        *
+        initial_train_pct
+        /
+        100
+    )
+
+    train_end = max(
+        250,
+        train_end,
+    )
+
+    minimum_oos_days = (
+        folds * 40
+    )
+
+    if (
+        n - train_end
+        <
+        minimum_oos_days
+    ):
+
+        train_end = (
+            n
+            -
+            minimum_oos_days
+        )
+
+    if train_end < 250:
+
+        raise ValueError(
+            "Train/OOS bölünmesi için yeterli veri yok."
+        )
+
+    remaining = (
+        n
+        -
+        train_end
+    )
+
+    if (
+        remaining
+        <
+        minimum_oos_days
+    ):
+
+        raise ValueError(
+            "Seçilen fold sayısı için OOS dönemi çok kısa."
+        )
+
+    base = (
+        remaining
+        //
+        folds
+    )
+
+    extra = (
+        remaining
+        %
+        folds
+    )
+
+    fold_results = []
+
+    cursor = (
+        train_end
+    )
+
+    compounded_equity = 1.0
+
+    total_trade_count = 0
+    total_rotation_count = 0
+
+    # ----------------------------------------
+    # FOLDS
+    # ----------------------------------------
+
+    for fold_no in range(
+        1,
+        folds + 1,
+    ):
+
+        fold_len = (
+            base
+            +
+            (
+                1
+                if fold_no <= extra
+                else 0
+            )
+        )
+
+        start_idx = (
+            cursor
+        )
+
+        end_idx = min(
+            n,
+            cursor + fold_len,
+        )
+
+        # ----------------------------------------
+        # IMPORTANT:
+        #
+        # Same methodology as V1.2D:
+        # one prior common trading day is included
+        # so a signal can execute on first OOS day.
+        #
+        # The 3-day confirmation itself is already
+        # calculated from the full chronological
+        # indicator history BEFORE this slicing.
+        #
+        # Therefore the filter can legitimately use
+        # the two preceding closes without using
+        # future information.
+        # ----------------------------------------
+
+        slice_start = max(
+            0,
+            start_idx - 1,
+        )
+
+        fold_dates = (
+            common_dates[
+                slice_start:end_idx
+            ]
+        )
+
+        if len(
+            fold_dates
+        ) < 2:
+
+            break
+
+        result = run_rotation_variant(
+
+            prepared=
+                confirmed_prepared,
+
+            common_dates=
+                fold_dates,
+
+            top_n=
+                2,
+
+            entry_score=
+                entry_score,
+
+            exit_score=
+                exit_score,
+
+            transaction_cost_pct=
+                transaction_cost_pct,
+        )
+
+        performance = (
+            result[
+                "performance"
+            ]
+        )
+
+        fold_equity = (
+            performance[
+                "final_equity"
+            ]
+        )
+
+        if fold_equity is None:
+
+            fold_equity = 1.0
+
+        fold_equity = float(
+            fold_equity
+        )
+
+        compounded_equity *= (
+            fold_equity
+        )
+
+        total_trade_count += int(
+            performance[
+                "trade_count"
+            ]
+            or 0
+        )
+
+        total_rotation_count += int(
+            performance[
+                "rotation_count"
+            ]
+            or 0
+        )
+
+        fold_results.append({
+
+            "fold":
+                fold_no,
+
+            "train_period": {
+
+                "start":
+                    str(
+                        common_dates[
+                            0
+                        ].date()
+                    ),
+
+                "end":
+                    str(
+                        common_dates[
+                            start_idx - 1
+                        ].date()
+                    ),
+
+                "trading_days":
+                    start_idx,
+            },
+
+            "oos_period": {
+
+                "start":
+                    str(
+                        common_dates[
+                            start_idx
+                        ].date()
+                    ),
+
+                "end":
+                    str(
+                        common_dates[
+                            end_idx - 1
+                        ].date()
+                    ),
+
+                "trading_days":
+                    (
+                        end_idx
+                        -
+                        start_idx
+                    ),
+            },
+
+            "result":
+                compact_rotation_result(
+                    result
+                ),
+        })
+
+        cursor = (
+            end_idx
+        )
+
+    if not fold_results:
+
+        raise ValueError(
+            "V1.3 OOS fold üretilemedi."
+        )
+
+    # ----------------------------------------
+    # OOS SUMMARY
+    # ----------------------------------------
+
+    oos_start = pd.Timestamp(
+        fold_results[
+            0
+        ][
+            "oos_period"
+        ][
+            "start"
+        ]
+    )
+
+    oos_end = pd.Timestamp(
+        fold_results[
+            -1
+        ][
+            "oos_period"
+        ][
+            "end"
+        ]
+    )
+
+    elapsed_years = (
+        (
+            oos_end
+            -
+            oos_start
+        ).days
+        /
+        365.25
+    )
+
+    compounded_return = (
+        compounded_equity
+        -
+        1
+    ) * 100
+
+    if (
+        elapsed_years > 0
+        and
+        compounded_equity > 0
+    ):
+
+        compounded_cagr = (
+            compounded_equity
+            **
+            (
+                1
+                /
+                elapsed_years
+            )
+            -
+            1
+        ) * 100
+
+    else:
+
+        compounded_cagr = None
+
+    positive_folds = sum(
+
+        1
+
+        for fold in fold_results
+
+        if (
+            fold[
+                "result"
+            ][
+                "performance"
+            ][
+                "strategy_total_return_pct"
+            ]
+            is not None
+
+            and
+
+            fold[
+                "result"
+            ][
+                "performance"
+            ][
+                "strategy_total_return_pct"
+            ]
+            > 0
+        )
+    )
+
+    pf_above_one_folds = sum(
+
+        1
+
+        for fold in fold_results
+
+        if (
+            fold[
+                "result"
+            ][
+                "performance"
+            ][
+                "profit_factor"
+            ]
+            is not None
+
+            and
+
+            fold[
+                "result"
+            ][
+                "performance"
+            ][
+                "profit_factor"
+            ]
+            > 1
+        )
+    )
+
+    return {
+
+        "model":
+            V13_MODEL_NAME,
+
+        "test":
+            "TOP2_STICKY_CONFIRM3_CHRONOLOGICAL_OOS",
+
+        "generated_at_utc":
+            utc_now(),
+
+        "full_period": {
+
+            "start":
+                str(
+                    common_dates[
+                        0
+                    ].date()
+                ),
+
+            "end":
+                str(
+                    common_dates[
+                        -1
+                    ].date()
+                ),
+
+            "years_requested":
+                years,
+
+            "common_trading_days":
+                n,
+        },
+
+        "experimental_change": {
+
+            "confirmation_days":
+                confirmation_days,
+
+            "rule":
+                (
+                    "New position requires AL_ADAYI "
+                    f"for {confirmation_days} consecutive closes"
+                ),
+
+            "applies_only_to":
+                "NEW_POSITION_ENTRY",
+
+            "exit_rules_changed":
+                False,
+
+            "score_rules_changed":
+                False,
+
+            "asset_universe_changed":
+                False,
+
+            "ranking_changed":
+                False,
+        },
+
+        "frozen_settings": {
+
+            "portfolio":
+                "TOP_2_EQUAL_WEIGHT",
+
+            "entry_score":
+                entry_score,
+
+            "exit_score":
+                exit_score,
+
+            "transaction_cost_pct_each_side":
+                transaction_cost_pct,
+
+            "ranking":
+                "SCORE, then MOM120, MOM60, MOM20",
+
+            "base_eligibility":
+                "AL_ADAYI and score >= entry_score",
+
+            "confirmation":
+                (
+                    f"{confirmation_days} consecutive "
+                    "AL_ADAYI closes"
+                ),
+
+            "exit_model":
+                "V1.2A_SLOW_EXIT",
+
+            "rotation_model":
+                "V1.2C_STICKY_ROTATION",
+
+            "execution":
+                "Signal at close, next trading day open",
+
+            "parameter_optimization":
+                False,
+
+            "long_only":
+                True,
+
+            "short":
+                False,
+
+            "leverage":
+                False,
+
+            "automatic_orders":
+                False,
+        },
+
+        "walk_forward": {
+
+            "initial_train_pct":
+                initial_train_pct,
+
+            "fold_count":
+                len(
+                    fold_results
+                ),
+
+            "fold_rule":
+                (
+                    "Same chronological folds as V1.2D; "
+                    "each fold starts from CASH; "
+                    "no fitting or parameter optimization"
+                ),
+        },
+
+        "oos_summary": {
+
+            "oos_start":
+                str(
+                    oos_start.date()
+                ),
+
+            "oos_end":
+                str(
+                    oos_end.date()
+                ),
+
+            "positive_fold_count":
+                positive_folds,
+
+            "profit_factor_above_1_fold_count":
+                pf_above_one_folds,
+
+            "total_fold_count":
+                len(
+                    fold_results
+                ),
+
+            "compounded_oos_return_pct":
+                safe_float(
+                    compounded_return,
+                    2,
+                ),
+
+            "compounded_oos_cagr_pct":
+                safe_float(
+                    compounded_cagr,
+                    2,
+                ),
+
+            "compounded_final_equity":
+                safe_float(
+                    compounded_equity,
+                    6,
+                ),
+
+            "trade_count":
+                total_trade_count,
+
+            "rotation_count":
+                total_rotation_count,
+        },
+
+        "folds":
+            fold_results,
+
+        "data_errors":
+            errors,
+    }
+
+
+# ============================================================
+# V1.2D vs V1.3 COMPARISON
+# SAME DATA / SAME FOLDS
+# ============================================================
+
+def run_v13_comparison(
+    years=10,
+    folds=4,
+    initial_train_pct=50,
+    entry_score=75,
+    exit_score=50,
+    transaction_cost_pct=0.10,
+    confirmation_days=V13_CONFIRMATION_DAYS,
+):
+
+    baseline = run_oos_walk_forward(
+
+        years=
+            years,
+
+        folds=
+            folds,
+
+        initial_train_pct=
+            initial_train_pct,
+
+        entry_score=
+            entry_score,
+
+        exit_score=
+            exit_score,
+
+        transaction_cost_pct=
+            transaction_cost_pct,
+    )
+
+    candidate = run_v13_oos_walk_forward(
+
+        years=
+            years,
+
+        folds=
+            folds,
+
+        initial_train_pct=
+            initial_train_pct,
+
+        entry_score=
+            entry_score,
+
+        exit_score=
+            exit_score,
+
+        transaction_cost_pct=
+            transaction_cost_pct,
+
+        confirmation_days=
+            confirmation_days,
+    )
+
+    baseline_summary = (
+        baseline[
+            "oos_summary"
+        ]
+    )
+
+    candidate_summary = (
+        candidate[
+            "oos_summary"
+        ]
+    )
+
+    fold_comparison = []
+
+    max_folds = min(
+        len(
+            baseline[
+                "folds"
+            ]
+        ),
+        len(
+            candidate[
+                "folds"
+            ]
+        ),
+    )
+
+    for i in range(
+        max_folds
+    ):
+
+        base_fold = (
+            baseline[
+                "folds"
+            ][i]
+        )
+
+        cand_fold = (
+            candidate[
+                "folds"
+            ][i]
+        )
+
+        bp = (
+            base_fold[
+                "result"
+            ][
+                "performance"
+            ]
+        )
+
+        cp = (
+            cand_fold[
+                "result"
+            ][
+                "performance"
+            ]
+        )
+
+        base_return = (
+            bp[
+                "strategy_total_return_pct"
+            ]
+        )
+
+        cand_return = (
+            cp[
+                "strategy_total_return_pct"
+            ]
+        )
+
+        return_difference = None
+
+        if (
+            base_return is not None
+            and
+            cand_return is not None
+        ):
+
+            return_difference = (
+                float(
+                    cand_return
+                )
+                -
+                float(
+                    base_return
+                )
+            )
+
+        fold_comparison.append({
+
+            "fold":
+                i + 1,
+
+            "oos_period":
+                base_fold[
+                    "oos_period"
+                ],
+
+            "v12d": {
+
+                "return_pct":
+                    base_return,
+
+                "max_drawdown_pct":
+                    bp[
+                        "max_drawdown_daily_pct"
+                    ],
+
+                "profit_factor":
+                    bp[
+                        "profit_factor"
+                    ],
+
+                "trade_count":
+                    bp[
+                        "trade_count"
+                    ],
+
+                "win_rate_pct":
+                    bp[
+                        "win_rate_pct"
+                    ],
+
+                "average_holding_days":
+                    bp[
+                        "average_holding_days"
+                    ],
+            },
+
+            "v13_confirm3": {
+
+                "return_pct":
+                    cand_return,
+
+                "max_drawdown_pct":
+                    cp[
+                        "max_drawdown_daily_pct"
+                    ],
+
+                "profit_factor":
+                    cp[
+                        "profit_factor"
+                    ],
+
+                "trade_count":
+                    cp[
+                        "trade_count"
+                    ],
+
+                "win_rate_pct":
+                    cp[
+                        "win_rate_pct"
+                    ],
+
+                "average_holding_days":
+                    cp[
+                        "average_holding_days"
+                    ],
+            },
+
+            "v13_minus_v12d_return_pct_points":
+                safe_float(
+                    return_difference,
+                    2,
+                ),
+        })
+
+    baseline_return = (
+        baseline_summary[
+            "compounded_oos_return_pct"
+        ]
+    )
+
+    candidate_return = (
+        candidate_summary[
+            "compounded_oos_return_pct"
+        ]
+    )
+
+    aggregate_difference = None
+
+    if (
+        baseline_return is not None
+        and
+        candidate_return is not None
+    ):
+
+        aggregate_difference = (
+            float(
+                candidate_return
+            )
+            -
+            float(
+                baseline_return
+            )
+        )
+
+    return {
+
+        "experiment":
+            "V1.2D_BASELINE_VS_V1.3_CONFIRM3",
+
+        "generated_at_utc":
+            utc_now(),
+
+        "methodology_note":
+            (
+                "V1.3 was designed after inspection of prior V1.2D "
+                "results. Therefore these historical folds are a "
+                "research robustness comparison, not pristine unseen "
+                "validation for V1.3."
+            ),
+
+        "only_rule_change":
+            (
+                f"V1.3 requires {confirmation_days} consecutive "
+                "AL_ADAYI closes before filling an empty portfolio slot."
+            ),
+
+        "unchanged": [
+
+            "Asset universe",
+
+            "Score calculation",
+
+            "Entry score threshold",
+
+            "V1.2A slow exit",
+
+            "V1.2C sticky holding logic",
+
+            "Top-2 equal weight",
+
+            "Ranking SCORE/MOM120/MOM60/MOM20",
+
+            "Transaction costs",
+
+            "Close signal / next-open execution",
+
+            "Long only",
+
+            "No leverage",
+
+            "No automatic orders",
+        ],
+
+        "v12d_baseline_summary":
+            baseline_summary,
+
+        "v13_candidate_summary":
+            candidate_summary,
+
+        "aggregate_return_difference_pct_points":
+            safe_float(
+                aggregate_difference,
+                2,
+            ),
+
+        "fold_comparison":
+            fold_comparison,
+
+        "v12d_full_result":
+            baseline,
+
+        "v13_full_result":
+            candidate,
+    }
+
+
+# ============================================================
+# V1.3 API ROUTES
+# ============================================================
+
+@app.get(
+    "/v13-rotation-backtest"
+)
+def v13_rotation_backtest_endpoint(
+
+    years: int = Query(
+        10,
+        ge=3,
+        le=15,
+    ),
+
+    entry_score: int = Query(
+        75,
+        ge=0,
+        le=100,
+    ),
+
+    exit_score: int = Query(
+        50,
+        ge=0,
+        le=100,
+    ),
+
+    transaction_cost_pct: float = Query(
+        0.10,
+        ge=0,
+        le=5,
+    ),
+):
+
+    try:
+
+        return run_v13_rotation_backtest(
+
+            years=
+                years,
+
+            entry_score=
+                entry_score,
+
+            exit_score=
+                exit_score,
+
+            transaction_cost_pct=
+                transaction_cost_pct,
+
+            confirmation_days=
+                V13_CONFIRMATION_DAYS,
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
+
+
+@app.get(
+    "/v13-oos-walk-forward"
+)
+def v13_oos_walk_forward_endpoint(
+
+    years: int = Query(
+        10,
+        ge=5,
+        le=15,
+    ),
+
+    folds: int = Query(
+        4,
+        ge=2,
+        le=8,
+    ),
+
+    initial_train_pct: int = Query(
+        50,
+        ge=30,
+        le=80,
+    ),
+
+    entry_score: int = Query(
+        75,
+        ge=0,
+        le=100,
+    ),
+
+    exit_score: int = Query(
+        50,
+        ge=0,
+        le=100,
+    ),
+
+    transaction_cost_pct: float = Query(
+        0.10,
+        ge=0,
+        le=5,
+    ),
+):
+
+    try:
+
+        return run_v13_oos_walk_forward(
+
+            years=
+                years,
+
+            folds=
+                folds,
+
+            initial_train_pct=
+                initial_train_pct,
+
+            entry_score=
+                entry_score,
+
+            exit_score=
+                exit_score,
+
+            transaction_cost_pct=
+                transaction_cost_pct,
+
+            confirmation_days=
+                V13_CONFIRMATION_DAYS,
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
+
+
+@app.get(
+    "/v13-compare"
+)
+def v13_compare_endpoint(
+
+    years: int = Query(
+        10,
+        ge=5,
+        le=15,
+    ),
+
+    folds: int = Query(
+        4,
+        ge=2,
+        le=8,
+    ),
+
+    initial_train_pct: int = Query(
+        50,
+        ge=30,
+        le=80,
+    ),
+
+    entry_score: int = Query(
+        75,
+        ge=0,
+        le=100,
+    ),
+
+    exit_score: int = Query(
+        50,
+        ge=0,
+        le=100,
+    ),
+
+    transaction_cost_pct: float = Query(
+        0.10,
+        ge=0,
+        le=5,
+    ),
+):
+
+    try:
+
+        return run_v13_comparison(
+
+            years=
+                years,
+
+            folds=
+                folds,
+
+            initial_train_pct=
+                initial_train_pct,
+
+            entry_score=
+                entry_score,
+
+            exit_score=
+                exit_score,
+
+            transaction_cost_pct=
+                transaction_cost_pct,
+
+            confirmation_days=
+                V13_CONFIRMATION_DAYS,
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
