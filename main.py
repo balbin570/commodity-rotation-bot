@@ -7,17 +7,17 @@ import math
 from datetime import datetime, timezone
 
 # ============================================================
-# COMMODITY ROTATION BOT v1.2B
+# COMMODITY ROTATION BOT v1.2C
 # LONG ONLY - NO SHORT - NO LEVERAGE - NO AUTOMATIC ORDERS
 # ============================================================
 
 app = FastAPI(
     title="Commodity Rotation Bot",
     description="Long-only commodity ETF/ETP rotation system",
-    version="1.2B",
+    version="1.2C",
 )
 
-MODEL_NAME = "COMMODITY-ROTATION-V1.2B"
+MODEL_NAME = "COMMODITY-ROTATION-V1.2C"
 
 ASSETS = {
     "GLD": {"name": "Gold", "tr_name": "Altın", "group": "METALS"},
@@ -929,7 +929,7 @@ def run_backtest_all(
 
 
 # ============================================================
-# V1.2B PORTFOLIO ROTATION
+# V1.2C STICKY PORTFOLIO ROTATION
 # ============================================================
 
 def prepare_rotation_data(years=10):
@@ -1072,6 +1072,15 @@ def run_rotation_variant(
     exit_score,
     transaction_cost_pct,
 ):
+    """
+    V1.2C STICKY ROTATION
+
+    Temel fark:
+    - Mevcut pozisyon, başka bir emtia daha yüksek skora çıktı diye satılmaz.
+    - Pozisyon yalnızca V1.2A slow-exit koşulu oluşursa kapanır.
+    - Boşalan slot, o günkü en güçlü uygun AL_ADAYI ile doldurulur.
+    - Sinyal kapanışta, işlem bir sonraki işlem günü açılışında uygulanır.
+    """
     cost = transaction_cost_pct / 100
 
     equity = 1.0
@@ -1079,7 +1088,6 @@ def run_rotation_variant(
     max_drawdown = 0.0
 
     holdings = {}
-
     trades = []
     rebalances = []
     equity_curve = []
@@ -1091,252 +1099,116 @@ def run_rotation_variant(
     exit_count = 0
 
     for i in range(len(common_dates) - 1):
-
         signal_date = common_dates[i]
         next_date = common_dates[i + 1]
 
-        # ------------------------------------------
         # CURRENT OPEN -> NEXT OPEN MARK TO MARKET
-        # ------------------------------------------
-
         if holdings:
+            # Gerçekte portföy o anda kaç slot doluysa sermaye o pozisyonlara
+            # eşit dağılmış kabul edilir. Top-2'de tek pozisyon varsa %50 değil,
+            # mevcut portföy sermayesinin tamamı o pozisyonda kabul edilmez;
+            # strateji slot mantığını korumak için her slot 1/top_n ağırlıktadır.
             weight = 1.0 / top_n
             daily_return = 0.0
 
             for symbol in holdings:
                 df = prepared[symbol]
-
-                current_open = float(
-                    df.loc[
-                        signal_date,
-                        "Open",
-                    ]
-                )
-
-                next_open = float(
-                    df.loc[
-                        next_date,
-                        "Open",
-                    ]
-                )
+                current_open = float(df.loc[signal_date, "Open"])
+                next_open = float(df.loc[next_date, "Open"])
 
                 if current_open > 0:
-                    daily_return += (
-                        next_open
-                        /
-                        current_open
-                        - 1
-                    ) * weight
+                    daily_return += (next_open / current_open - 1) * weight
 
-            equity *= (
-                1 + daily_return
-            )
+            equity *= 1 + daily_return
 
-        # ------------------------------------------
-        # CLOSE SIGNAL
-        # ------------------------------------------
+        # CLOSE SIGNAL: önce sadece gerçek exit koşullarını kontrol et
+        old_symbols = list(holdings.keys())
+        exiting = []
 
+        for symbol in old_symbols:
+            row = prepared[symbol].loc[signal_date]
+            if rotation_exit_required(row, exit_score):
+                exiting.append(symbol)
+
+        survivors = [s for s in old_symbols if s not in exiting]
+
+        # Yeni aday sıralaması yalnızca BOŞ SLOT doldurmak için kullanılır
         candidates = rotation_candidates(
             prepared,
             signal_date,
             entry_score,
         )
 
-        ranked_symbols = [
-            x["symbol"]
-            for x in candidates
-        ]
+        candidate_symbols = [x["symbol"] for x in candidates]
+        entering = []
+        next_symbols = list(survivors)
 
-        desired = ranked_symbols[:top_n]
+        free_slots = max(0, top_n - len(next_symbols))
 
-        survivors = []
-
-        for symbol in holdings:
-            row = prepared[symbol].loc[
-                signal_date
-            ]
-
-            must_exit = (
-                rotation_exit_required(
-                    row,
-                    exit_score,
-                )
-            )
-
-            if (
-                not must_exit
-                and symbol in desired
-            ):
-                survivors.append(symbol)
-
-        next_symbols = []
-
-        for symbol in desired:
-            if symbol in survivors:
+        if free_slots > 0:
+            for symbol in candidate_symbols:
+                if symbol in next_symbols:
+                    continue
+                entering.append(symbol)
                 next_symbols.append(symbol)
-            else:
-                next_symbols.append(symbol)
+                if len(entering) >= free_slots:
+                    break
 
-        old_symbols = list(
-            holdings.keys()
-        )
-
-        exiting = [
-            x
-            for x in old_symbols
-            if x not in next_symbols
-        ]
-
-        entering = [
-            x
-            for x in next_symbols
-            if x not in old_symbols
-        ]
-
-        # ------------------------------------------
-        # COSTS
-        # ------------------------------------------
-
-        sides = (
-            len(exiting)
-            +
-            len(entering)
-        )
-
+        # COSTS: çıkan ve giren her taraf için bir işlem maliyeti
+        sides = len(exiting) + len(entering)
         if sides:
-            equity *= (
-                1
-                -
-                cost
-                *
-                sides
-                /
-                top_n
-            )
+            equity *= 1 - cost * sides / top_n
 
-        # ------------------------------------------
         # CLOSE TRADES
-        # ------------------------------------------
-
         for symbol in exiting:
             old = holdings[symbol]
-
             entry_date = old["entry_date"]
+            entry_open = float(prepared[symbol].loc[entry_date, "Open"])
+            exit_open = float(prepared[symbol].loc[next_date, "Open"])
 
-            entry_open = float(
-                prepared[symbol].loc[
-                    entry_date,
-                    "Open",
-                ]
-            )
-
-            exit_open = float(
-                prepared[symbol].loc[
-                    next_date,
-                    "Open",
-                ]
-            )
-
-            gross = (
-                exit_open / entry_open - 1
-            )
-
-            net = (
-                (1 + gross)
-                *
-                (1 - cost)
-                *
-                (1 - cost)
-                - 1
-            )
+            gross = exit_open / entry_open - 1
+            net = (1 + gross) * (1 - cost) * (1 - cost) - 1
 
             trades.append({
                 "symbol": symbol,
-                "entry_date":
-                    str(entry_date.date()),
-                "exit_date":
-                    str(next_date.date()),
-                "entry_score":
-                    old["entry_score"],
-                "exit_score":
-                    safe_int(
-                        prepared[symbol]
-                        .loc[
-                            signal_date,
-                            "SCORE",
-                        ]
-                    ),
-                "return_pct":
-                    safe_float(
-                        net * 100,
-                        2,
-                    ),
-                "holding_days":
-                    (
-                        next_date
-                        -
-                        entry_date
-                    ).days,
+                "entry_date": str(entry_date.date()),
+                "exit_date": str(next_date.date()),
+                "entry_score": old["entry_score"],
+                "exit_score": safe_int(prepared[symbol].loc[signal_date, "SCORE"]),
+                "return_pct": safe_float(net * 100, 2),
+                "holding_days": (next_date - entry_date).days,
+                "exit_reason": "V1.2A_SLOW_EXIT",
             })
-
             exit_count += 1
 
-        # ------------------------------------------
-        # NEW HOLDINGS
-        # ------------------------------------------
-
+        # BUILD NEXT HOLDINGS
         new_holdings = {}
 
-        for symbol in next_symbols:
+        for symbol in survivors:
+            new_holdings[symbol] = holdings[symbol]
 
-            if symbol in holdings:
-                new_holdings[symbol] = (
-                    holdings[symbol]
-                )
+        for symbol in entering:
+            score = int(prepared[symbol].loc[signal_date, "SCORE"])
+            new_holdings[symbol] = {
+                "entry_date": next_date,
+                "entry_score": score,
+            }
+            entry_count += 1
 
-            else:
-                score = int(
-                    prepared[symbol]
-                    .loc[
-                        signal_date,
-                        "SCORE",
-                    ]
-                )
-
-                new_holdings[symbol] = {
-                    "entry_date":
-                        next_date,
-                    "entry_score":
-                        score,
-                }
-
-                entry_count += 1
-
-        if (
-            old_symbols
-            and next_symbols
-            and set(old_symbols)
-            !=
-            set(next_symbols)
-        ):
+        # Rotation = aynı rebalance gününde en az bir çıkış ve en az bir giriş
+        if exiting and entering:
             rotation_count += 1
 
         if sides:
             rebalances.append({
-                "signal_date":
-                    str(signal_date.date()),
-                "execution_date":
-                    str(next_date.date()),
-                "from":
-                    old_symbols
-                    if old_symbols
-                    else ["CASH"],
-                "to":
-                    next_symbols
-                    if next_symbols
-                    else ["CASH"],
-                "transaction_sides":
-                    sides,
+                "signal_date": str(signal_date.date()),
+                "execution_date": str(next_date.date()),
+                "from": old_symbols if old_symbols else ["CASH"],
+                "to": next_symbols if next_symbols else ["CASH"],
+                "exiting": exiting,
+                "entering": entering,
+                "survivors": survivors,
+                "transaction_sides": sides,
             })
 
         holdings = new_holdings
@@ -1346,207 +1218,67 @@ def run_rotation_variant(
         else:
             cash_days += 1
 
-        peak = max(
-            peak,
-            equity,
-        )
-
-        drawdown = (
-            equity / peak - 1
-        ) * 100
-
-        max_drawdown = min(
-            max_drawdown,
-            drawdown,
-        )
+        peak = max(peak, equity)
+        drawdown = (equity / peak - 1) * 100
+        max_drawdown = min(max_drawdown, drawdown)
 
         equity_curve.append({
-            "date":
-                str(next_date.date()),
-            "equity":
-                safe_float(
-                    equity,
-                    6,
-                ),
-            "drawdown_pct":
-                safe_float(
-                    drawdown,
-                    2,
-                ),
-            "holdings":
-                list(holdings.keys())
-                if holdings
-                else ["CASH"],
+            "date": str(next_date.date()),
+            "equity": safe_float(equity, 6),
+            "drawdown_pct": safe_float(drawdown, 2),
+            "holdings": list(holdings.keys()) if holdings else ["CASH"],
         })
 
-    # ========================================================
     # FINAL CLOSE
-    # ========================================================
-
     final_date = common_dates[-1]
 
     if holdings:
-
         weight = 1.0 / top_n
         final_day_return = 0.0
 
         for symbol in holdings:
             df = prepared[symbol]
-
-            final_open = float(
-                df.loc[
-                    final_date,
-                    "Open",
-                ]
-            )
-
-            final_close = float(
-                df.loc[
-                    final_date,
-                    "Close",
-                ]
-            )
-
+            final_open = float(df.loc[final_date, "Open"])
+            final_close = float(df.loc[final_date, "Close"])
             if final_open > 0:
-                final_day_return += (
-                    final_close
-                    /
-                    final_open
-                    - 1
-                ) * weight
+                final_day_return += (final_close / final_open - 1) * weight
 
-        equity *= (
-            1 + final_day_return
-        )
-
-        equity *= (
-            1
-            -
-            cost
-            *
-            len(holdings)
-            /
-            top_n
-        )
+        equity *= 1 + final_day_return
+        equity *= 1 - cost * len(holdings) / top_n
 
         for symbol, old in holdings.items():
-
             entry_date = old["entry_date"]
+            entry_open = float(prepared[symbol].loc[entry_date, "Open"])
+            final_close = float(prepared[symbol].loc[final_date, "Close"])
 
-            entry_open = float(
-                prepared[symbol]
-                .loc[
-                    entry_date,
-                    "Open",
-                ]
-            )
-
-            final_close = float(
-                prepared[symbol]
-                .loc[
-                    final_date,
-                    "Close",
-                ]
-            )
-
-            gross = (
-                final_close
-                /
-                entry_open
-                - 1
-            )
-
-            net = (
-                (1 + gross)
-                *
-                (1 - cost)
-                *
-                (1 - cost)
-                - 1
-            )
+            gross = final_close / entry_open - 1
+            net = (1 + gross) * (1 - cost) * (1 - cost) - 1
 
             trades.append({
                 "symbol": symbol,
-                "entry_date":
-                    str(entry_date.date()),
-                "exit_date":
-                    str(final_date.date()),
-                "entry_score":
-                    old["entry_score"],
-                "exit_score":
-                    safe_int(
-                        prepared[symbol]
-                        .loc[
-                            final_date,
-                            "SCORE",
-                        ]
-                    ),
-                "return_pct":
-                    safe_float(
-                        net * 100,
-                        2,
-                    ),
-                "holding_days":
-                    (
-                        final_date
-                        -
-                        entry_date
-                    ).days,
-                "forced_exit_at_test_end":
-                    True,
+                "entry_date": str(entry_date.date()),
+                "exit_date": str(final_date.date()),
+                "entry_score": old["entry_score"],
+                "exit_score": safe_int(prepared[symbol].loc[final_date, "SCORE"]),
+                "return_pct": safe_float(net * 100, 2),
+                "holding_days": (final_date - entry_date).days,
+                "forced_exit_at_test_end": True,
             })
-
             exit_count += 1
 
-        peak = max(
-            peak,
-            equity,
-        )
+        peak = max(peak, equity)
+        drawdown = (equity / peak - 1) * 100
+        max_drawdown = min(max_drawdown, drawdown)
 
-        drawdown = (
-            equity / peak - 1
-        ) * 100
-
-        max_drawdown = min(
-            max_drawdown,
-            drawdown,
-        )
-
-    returns = [
-        x["return_pct"]
-        for x in trades
-        if x["return_pct"] is not None
-    ]
-
-    winners = [
-        x
-        for x in returns
-        if x > 0
-    ]
-
-    losers = [
-        x
-        for x in returns
-        if x <= 0
-    ]
+    returns = [x["return_pct"] for x in trades if x["return_pct"] is not None]
+    winners = [x for x in returns if x > 0]
+    losers = [x for x in returns if x <= 0]
 
     if returns:
-        win_rate = (
-            len(winners)
-            /
-            len(returns)
-            *
-            100
-        )
-
+        win_rate = len(winners) / len(returns) * 100
         avg_trade = np.mean(returns)
         median_trade = np.median(returns)
-
-        avg_holding = np.mean([
-            x["holding_days"]
-            for x in trades
-        ])
-
+        avg_holding = np.mean([x["holding_days"] for x in trades])
     else:
         win_rate = 0
         avg_trade = 0
@@ -1557,172 +1289,52 @@ def run_rotation_variant(
     gross_loss = abs(sum(losers))
 
     if gross_loss > 0:
-        profit_factor = (
-            gross_profit
-            /
-            gross_loss
-        )
-
+        profit_factor = gross_profit / gross_loss
     elif gross_profit > 0:
         profit_factor = None
-
     else:
         profit_factor = 0
 
     start_date = common_dates[0]
     end_date = common_dates[-1]
+    elapsed_years = (end_date - start_date).days / 365.25
 
-    elapsed_years = (
-        (end_date - start_date).days
-        /
-        365.25
-    )
-
-    total_return = (
-        equity - 1
-    ) * 100
-
-    if (
-        elapsed_years > 0
-        and equity > 0
-    ):
-        cagr = (
-            equity
-            **
-            (1 / elapsed_years)
-            - 1
-        ) * 100
-
+    total_return = (equity - 1) * 100
+    if elapsed_years > 0 and equity > 0:
+        cagr = (equity ** (1 / elapsed_years) - 1) * 100
     else:
         cagr = None
 
-    active_days = (
-        cash_days
-        +
-        invested_days
-    )
-
-    cash_pct = (
-        cash_days
-        /
-        active_days
-        *
-        100
-        if active_days
-        else 0
-    )
-
-    invested_pct = (
-        invested_days
-        /
-        active_days
-        *
-        100
-        if active_days
-        else 0
-    )
+    active_days = cash_days + invested_days
+    cash_pct = cash_days / active_days * 100 if active_days else 0
+    invested_pct = invested_days / active_days * 100 if active_days else 0
 
     return {
-        "portfolio":
-            f"TOP_{top_n}",
-
-        "slots":
-            top_n,
-
-        "weighting":
-            "EQUAL_WEIGHT",
-
+        "portfolio": f"TOP_{top_n}",
+        "slots": top_n,
+        "weighting": "EQUAL_WEIGHT",
+        "rotation_model": "V1.2C_STICKY_ROTATION",
         "performance": {
-            "strategy_total_return_pct":
-                safe_float(
-                    total_return,
-                    2,
-                ),
-
-            "strategy_cagr_pct":
-                safe_float(
-                    cagr,
-                    2,
-                ),
-
-            "max_drawdown_daily_pct":
-                safe_float(
-                    max_drawdown,
-                    2,
-                ),
-
-            "trade_count":
-                len(trades),
-
-            "win_rate_pct":
-                safe_float(
-                    win_rate,
-                    2,
-                ),
-
-            "profit_factor":
-                safe_float(
-                    profit_factor,
-                    3,
-                ),
-
-            "average_trade_pct":
-                safe_float(
-                    avg_trade,
-                    2,
-                ),
-
-            "median_trade_pct":
-                safe_float(
-                    median_trade,
-                    2,
-                ),
-
-            "average_holding_days":
-                safe_float(
-                    avg_holding,
-                    1,
-                ),
-
-            "entry_count":
-                entry_count,
-
-            "exit_count":
-                exit_count,
-
-            "rotation_count":
-                rotation_count,
-
-            "cash_days":
-                cash_days,
-
-            "cash_time_pct":
-                safe_float(
-                    cash_pct,
-                    2,
-                ),
-
-            "invested_time_pct":
-                safe_float(
-                    invested_pct,
-                    2,
-                ),
-
-            "final_equity":
-                safe_float(
-                    equity,
-                    6,
-                ),
+            "strategy_total_return_pct": safe_float(total_return, 2),
+            "strategy_cagr_pct": safe_float(cagr, 2),
+            "max_drawdown_daily_pct": safe_float(max_drawdown, 2),
+            "trade_count": len(trades),
+            "win_rate_pct": safe_float(win_rate, 2),
+            "profit_factor": safe_float(profit_factor, 3),
+            "average_trade_pct": safe_float(avg_trade, 2),
+            "median_trade_pct": safe_float(median_trade, 2),
+            "average_holding_days": safe_float(avg_holding, 1),
+            "entry_count": entry_count,
+            "exit_count": exit_count,
+            "rotation_count": rotation_count,
+            "cash_days": cash_days,
+            "cash_time_pct": safe_float(cash_pct, 2),
+            "invested_time_pct": safe_float(invested_pct, 2),
+            "final_equity": safe_float(equity, 6),
         },
-
-        "trades":
-            trades,
-
-        "rebalances":
-            rebalances,
-
-        "equity_curve":
-            equity_curve,
+        "trades": trades,
+        "rebalances": rebalances,
+        "equity_curve": equity_curve,
     }
 
 
@@ -1841,6 +1453,12 @@ def run_rotation_backtest(
 
             "exit_model":
                 "V1.2A_SLOW_EXIT",
+
+            "rotation_model":
+                "V1.2C_STICKY_ROTATION",
+
+            "holding_rule":
+                "Mevcut pozisyon sadece slow-exit ile kapanir; ranking sadece bos slot doldurur",
 
             "long_only":
                 True,
@@ -2127,14 +1745,14 @@ a {
 
 <body>
 
-<h1>Commodity Rotation Bot v1.2B</h1>
+<h1>Commodity Rotation Bot v1.2C</h1>
 
 <p>
 Long-only commodity ETF/ETP scanner
 </p>
 
 <p>
-V1.2B - Portfolio Rotation
+V1.2C - Sticky Portfolio Rotation
 </p>
 
 
