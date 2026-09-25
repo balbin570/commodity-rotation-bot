@@ -1712,6 +1712,204 @@ def run_backtest(
             utc_now(),
     }
 
+# ============================================================
+# BACKTEST ALL
+# ============================================================
+
+def run_backtest_all(
+    years=10,
+    entry_score=75,
+    exit_score=50,
+    transaction_cost_pct=0.10,
+):
+
+    results = []
+    errors = []
+
+    for symbol in ASSETS:
+
+        try:
+
+            bt = run_backtest(
+                symbol=symbol,
+                years=years,
+                entry_score=entry_score,
+                exit_score=exit_score,
+                transaction_cost_pct=transaction_cost_pct,
+            )
+
+            performance = bt["performance"]
+
+            results.append(
+                {
+                    "symbol": symbol,
+                    "commodity": ASSETS[symbol]["tr_name"],
+                    "group": ASSETS[symbol]["group"],
+
+                    "trade_count":
+                        performance["trade_count"],
+
+                    "win_rate_pct":
+                        performance["win_rate_pct"],
+
+                    "profit_factor":
+                        performance["profit_factor"],
+
+                    "average_trade_pct":
+                        performance["average_trade_pct"],
+
+                    "median_trade_pct":
+                        performance["median_trade_pct"],
+
+                    "average_holding_days":
+                        performance["average_holding_days"],
+
+                    "strategy_total_return_pct":
+                        performance["strategy_total_return_pct"],
+
+                    "strategy_cagr_pct":
+                        performance["strategy_cagr_pct"],
+
+                    "max_drawdown_pct":
+                        performance["max_drawdown_trade_level_pct"],
+
+                    "buy_hold_return_pct":
+                        performance["buy_hold_return_pct"],
+                }
+            )
+
+        except Exception as exc:
+
+            errors.append(
+                {
+                    "symbol": symbol,
+                    "error": str(exc),
+                }
+            )
+
+    # Profit Factor'a göre sadece görüntüleme sırası.
+    # Bu sıralama yatırım önerisi değildir.
+    def pf_sort_value(item):
+
+        pf = item["profit_factor"]
+
+        if pf is None:
+            return -999999
+
+        return pf
+
+    results = sorted(
+        results,
+        key=pf_sort_value,
+        reverse=True,
+    )
+
+    for index, item in enumerate(
+        results,
+        start=1,
+    ):
+        item["backtest_rank"] = index
+
+    profitable_count = sum(
+        1
+        for item in results
+        if (
+            item["strategy_total_return_pct"]
+            is not None
+            and
+            item["strategy_total_return_pct"] > 0
+        )
+    )
+
+    pf_above_one_count = sum(
+        1
+        for item in results
+        if (
+            item["profit_factor"]
+            is not None
+            and
+            item["profit_factor"] > 1
+        )
+    )
+
+    beat_buy_hold_count = sum(
+        1
+        for item in results
+        if (
+            item["strategy_total_return_pct"]
+            is not None
+            and
+            item["buy_hold_return_pct"]
+            is not None
+            and
+            item["strategy_total_return_pct"]
+            >
+            item["buy_hold_return_pct"]
+        )
+    )
+
+    return {
+
+        "model":
+            MODEL_NAME,
+
+        "test":
+            "BACKTEST_ALL",
+
+        "generated_at_utc":
+            utc_now(),
+
+        "settings": {
+
+            "years":
+                years,
+
+            "entry_score":
+                entry_score,
+
+            "exit_score":
+                exit_score,
+
+            "transaction_cost_pct_each_side":
+                transaction_cost_pct,
+
+            "execution":
+                "Signal at close, next trading day open",
+
+            "long_only":
+                True,
+
+            "short":
+                False,
+
+            "leverage":
+                False,
+        },
+
+        "summary": {
+
+            "asset_count_tested":
+                len(results),
+
+            "error_count":
+                len(errors),
+
+            "profitable_strategy_count":
+                profitable_count,
+
+            "profit_factor_above_1_count":
+                pf_above_one_count,
+
+            "strategy_beats_buy_hold_count":
+                beat_buy_hold_count,
+        },
+
+        "results":
+            results,
+
+        "errors":
+            errors,
+    }
 
 # ============================================================
 # API ENDPOINTS
@@ -1828,6 +2026,42 @@ def scan():
 
     return scan_all_assets()
 
+@app.get("/backtest-all")
+def backtest_all(
+    years: int = Query(
+        10,
+        ge=2,
+        le=20,
+    ),
+    entry_score: int = Query(
+        75,
+        ge=50,
+        le=100,
+    ),
+    exit_score: int = Query(
+        50,
+        ge=0,
+        le=80,
+    ),
+    transaction_cost_pct: float = Query(
+        0.10,
+        ge=0,
+        le=2,
+    ),
+):
+    try:
+        return run_backtest_all(
+            years=years,
+            entry_score=entry_score,
+            exit_score=exit_score,
+            transaction_cost_pct=transaction_cost_pct,
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
 
 @app.get("/backtest/{symbol}")
 def backtest(
