@@ -9735,3 +9735,519 @@ def v13_diagnostic_all_folds_endpoint():
             transaction_cost_pct=0.10,
         )
     )
+
+# ============================================================
+# COMMODITY DATA HISTORY DIAGNOSTIC
+#
+# PURPOSE:
+# - Find earliest available history for every asset
+# - Find common start date
+# - Check whether pre-2016 independent testing is possible
+#
+# NO STRATEGY RULES ARE CHANGED.
+# ============================================================
+
+
+@app.get("/data-history")
+def commodity_data_history():
+
+    history_results = []
+
+    valid_series = {}
+
+    # --------------------------------------------------------
+    # Use the SAME ASSET universe already defined in main.py
+    # --------------------------------------------------------
+
+    for symbol in ASSETS.keys():
+
+        try:
+
+            # ------------------------------------------------
+            # Download maximum available history
+            # ------------------------------------------------
+
+            df = yf.download(
+                symbol,
+                period="max",
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+            )
+
+            if df is None or df.empty:
+
+                history_results.append({
+                    "symbol": symbol,
+                    "status": "NO_DATA",
+                })
+
+                continue
+
+            # ------------------------------------------------
+            # Handle possible yfinance MultiIndex columns
+            # ------------------------------------------------
+
+            if isinstance(
+                df.columns,
+                pd.MultiIndex,
+            ):
+
+                df.columns = [
+                    col[0]
+                    if isinstance(col, tuple)
+                    else col
+                    for col in df.columns
+                ]
+
+            # ------------------------------------------------
+            # Keep valid close prices only
+            # ------------------------------------------------
+
+            if "Close" not in df.columns:
+
+                history_results.append({
+                    "symbol": symbol,
+                    "status": "NO_CLOSE_COLUMN",
+                })
+
+                continue
+
+            df = df.dropna(
+                subset=["Close"]
+            )
+
+            if df.empty:
+
+                history_results.append({
+                    "symbol": symbol,
+                    "status": "NO_VALID_CLOSE",
+                })
+
+                continue
+
+            # ------------------------------------------------
+            # Normalize index
+            # ------------------------------------------------
+
+            df.index = pd.to_datetime(
+                df.index
+            )
+
+            # Remove timezone if present
+
+            try:
+
+                if df.index.tz is not None:
+
+                    df.index = (
+                        df.index.tz_localize(
+                            None
+                        )
+                    )
+
+            except Exception:
+
+                pass
+
+            first_date = (
+                df.index.min()
+            )
+
+            last_date = (
+                df.index.max()
+            )
+
+            trading_days = len(
+                df
+            )
+
+            years_available = (
+                (
+                    last_date
+                    -
+                    first_date
+                ).days
+                /
+                365.25
+            )
+
+            valid_series[
+                symbol
+            ] = df
+
+            # ------------------------------------------------
+            # Count observations before 2016
+            # ------------------------------------------------
+
+            pre_2016 = df[
+                df.index
+                <
+                pd.Timestamp(
+                    "2016-01-01"
+                )
+            ]
+
+            pre_2016_days = len(
+                pre_2016
+            )
+
+            # ------------------------------------------------
+            # Count observations before Sep-2016
+            #
+            # Current 10y test starts around Sep-2016.
+            # ------------------------------------------------
+
+            pre_current_test = df[
+                df.index
+                <
+                pd.Timestamp(
+                    "2016-09-26"
+                )
+            ]
+
+            pre_current_test_days = len(
+                pre_current_test
+            )
+
+            history_results.append({
+
+                "symbol":
+                    symbol,
+
+                "status":
+                    "OK",
+
+                "first_date":
+                    str(
+                        first_date.date()
+                    ),
+
+                "last_date":
+                    str(
+                        last_date.date()
+                    ),
+
+                "trading_days":
+                    trading_days,
+
+                "years_available":
+                    round(
+                        years_available,
+                        2,
+                    ),
+
+                "pre_2016_trading_days":
+                    pre_2016_days,
+
+                "pre_2016_09_26_trading_days":
+                    pre_current_test_days,
+            })
+
+        except Exception as e:
+
+            history_results.append({
+
+                "symbol":
+                    symbol,
+
+                "status":
+                    "ERROR",
+
+                "error":
+                    str(e),
+            })
+
+    # ========================================================
+    # COMMON CALENDAR
+    # ========================================================
+
+    if not valid_series:
+
+        return {
+
+            "status":
+                "NO_VALID_DATA",
+
+            "assets":
+                history_results,
+        }
+
+    # --------------------------------------------------------
+    # Earliest date where EVERY asset exists
+    # --------------------------------------------------------
+
+    first_dates = {
+
+        symbol:
+            df.index.min()
+
+        for symbol, df
+        in valid_series.items()
+    }
+
+    last_dates = {
+
+        symbol:
+            df.index.max()
+
+        for symbol, df
+        in valid_series.items()
+    }
+
+    common_start = max(
+        first_dates.values()
+    )
+
+    common_end = min(
+        last_dates.values()
+    )
+
+    # --------------------------------------------------------
+    # Exact intersection of trading dates
+    # --------------------------------------------------------
+
+    common_index = None
+
+    for symbol, df in valid_series.items():
+
+        idx = pd.DatetimeIndex(
+            df.index
+        )
+
+        if common_index is None:
+
+            common_index = idx
+
+        else:
+
+            common_index = (
+                common_index.intersection(
+                    idx
+                )
+            )
+
+    common_index = (
+        common_index.sort_values()
+    )
+
+    if len(
+        common_index
+    ) > 0:
+
+        exact_common_first = (
+            common_index[
+                0
+            ]
+        )
+
+        exact_common_last = (
+            common_index[
+                -1
+            ]
+        )
+
+    else:
+
+        exact_common_first = None
+        exact_common_last = None
+
+    # ========================================================
+    # PRE-2016 COMMON DATA
+    # ========================================================
+
+    if common_index is not None:
+
+        pre_2016_common = (
+            common_index[
+                common_index
+                <
+                pd.Timestamp(
+                    "2016-01-01"
+                )
+            ]
+        )
+
+        pre_current_test_common = (
+            common_index[
+                common_index
+                <
+                pd.Timestamp(
+                    "2016-09-26"
+                )
+            ]
+        )
+
+    else:
+
+        pre_2016_common = []
+        pre_current_test_common = []
+
+    # ========================================================
+    # ASSET THAT LIMITS HISTORY
+    # ========================================================
+
+    limiting_symbol = max(
+        first_dates,
+        key=first_dates.get,
+    )
+
+    limiting_date = (
+        first_dates[
+            limiting_symbol
+        ]
+    )
+
+    # ========================================================
+    # SIMPLE RESEARCH FEASIBILITY
+    #
+    # We are NOT creating a strategy rule here.
+    #
+    # Rough interpretation:
+    #
+    # >= 750 common trading days before current test
+    #    ~ 3 years
+    #
+    # >= 1250
+    #    ~ 5 years
+    # ========================================================
+
+    pre_test_days = len(
+        pre_current_test_common
+    )
+
+    if pre_test_days >= 1250:
+
+        feasibility = (
+            "STRONG_PRE_2016_TEST_WINDOW"
+        )
+
+    elif pre_test_days >= 750:
+
+        feasibility = (
+            "USABLE_PRE_2016_TEST_WINDOW"
+        )
+
+    elif pre_test_days >= 500:
+
+        feasibility = (
+            "LIMITED_PRE_2016_TEST_WINDOW"
+        )
+
+    else:
+
+        feasibility = (
+            "INSUFFICIENT_PRE_2016_COMMON_HISTORY"
+        )
+
+    # ========================================================
+    # SORT ASSETS BY START DATE
+    # ========================================================
+
+    history_results = sorted(
+        history_results,
+        key=lambda x: (
+            x.get(
+                "first_date",
+                "9999-12-31",
+            )
+        ),
+    )
+
+    # ========================================================
+    # RETURN
+    # ========================================================
+
+    return {
+
+        "diagnostic":
+            "COMMODITY-DATA-HISTORY-V1",
+
+        "purpose":
+            (
+                "Check whether an independent historical "
+                "period exists before the current "
+                "2016-09-26 onward research window."
+            ),
+
+        "strategy_modified":
+            False,
+
+        "asset_count_expected":
+            len(
+                ASSETS
+            ),
+
+        "asset_count_with_data":
+            len(
+                valid_series
+            ),
+
+        "assets":
+            history_results,
+
+        "common_history": {
+
+            "common_start_based_on_asset_availability":
+                str(
+                    common_start.date()
+                ),
+
+            "common_end_based_on_asset_availability":
+                str(
+                    common_end.date()
+                ),
+
+            "exact_common_first_trading_day":
+                (
+                    str(
+                        exact_common_first.date()
+                    )
+                    if exact_common_first is not None
+                    else None
+                ),
+
+            "exact_common_last_trading_day":
+                (
+                    str(
+                        exact_common_last.date()
+                    )
+                    if exact_common_last is not None
+                    else None
+                ),
+
+            "exact_common_trading_days":
+                len(
+                    common_index
+                ),
+
+            "common_days_before_2016_01_01":
+                len(
+                    pre_2016_common
+                ),
+
+            "common_days_before_current_test_start":
+                pre_test_days,
+        },
+
+        "history_limiting_asset": {
+
+            "symbol":
+                limiting_symbol,
+
+            "first_date":
+                str(
+                    limiting_date.date()
+                ),
+        },
+
+        "pre_2016_research_feasibility":
+            feasibility,
+
+        "important_note":
+            (
+                "No V1.3 or V1.5 trading rule was executed. "
+                "This endpoint only examines raw historical "
+                "data availability."
+            ),
+    }
