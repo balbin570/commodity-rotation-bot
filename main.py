@@ -10251,3 +10251,1894 @@ def commodity_data_history():
                 "data availability."
             ),
     }
+
+# ============================================================
+# V1.3 PRE-2016 HISTORICAL HOLDOUT TEST
+# ============================================================
+#
+# PURPOSE
+# -------
+# Test the frozen V1.3 CONFIRM3 strategy on historical data
+# BEFORE the existing 2016-09-26 -> 2026-09-25 research window.
+#
+# IMPORTANT
+# ---------
+# - NO parameter optimization
+# - NO V1.4 breadth filter
+# - NO V1.5 overextension filter
+# - SAME score model
+# - SAME slow exit
+# - SAME sticky Top-2 portfolio
+# - SAME 3 consecutive AL_ADAYI confirmation
+# - SAME next-open execution
+# - SAME 0.10% transaction cost each side
+#
+# This is a HOLDOUT VALIDATION TEST.
+# ============================================================
+
+
+def v13_pre2016_prepare_data():
+
+    prepared = {}
+    errors = []
+
+    # --------------------------------------------------------
+    # Download MAX history.
+    #
+    # Indicators are calculated BEFORE the holdout window
+    # is selected.
+    #
+    # This avoids artificially resetting EMA/MOM indicators
+    # at the beginning of the holdout.
+    # --------------------------------------------------------
+
+    for symbol in ASSETS:
+
+        try:
+
+            df = yf.download(
+                symbol,
+                period="max",
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+            )
+
+            if df is None or df.empty:
+
+                errors.append({
+                    "symbol": symbol,
+                    "error": "NO_DATA",
+                })
+
+                continue
+
+            # ------------------------------------------------
+            # yfinance can return MultiIndex columns
+            # ------------------------------------------------
+
+            if isinstance(
+                df.columns,
+                pd.MultiIndex,
+            ):
+
+                df.columns = [
+
+                    col[0]
+                    if isinstance(
+                        col,
+                        tuple,
+                    )
+                    else col
+
+                    for col in df.columns
+                ]
+
+            # ------------------------------------------------
+            # Normalize index
+            # ------------------------------------------------
+
+            df.index = pd.to_datetime(
+                df.index
+            )
+
+            try:
+
+                if df.index.tz is not None:
+
+                    df.index = (
+                        df.index.tz_localize(
+                            None
+                        )
+                    )
+
+            except Exception:
+
+                pass
+
+            df = df.sort_index()
+
+            # ------------------------------------------------
+            # Existing frozen indicator engine
+            # ------------------------------------------------
+
+            df = calculate_indicators(
+                df
+            )
+
+            # ------------------------------------------------
+            # Do NOT drop early rows until indicators exist.
+            # Same principle as existing engine.
+            # ------------------------------------------------
+
+            df = df.dropna().copy()
+
+            if df.empty:
+
+                errors.append({
+                    "symbol": symbol,
+                    "error":
+                        "NO_ROWS_AFTER_INDICATORS",
+                })
+
+                continue
+
+            # ------------------------------------------------
+            # Frozen score + signal model
+            # ------------------------------------------------
+
+            scores = []
+            signals = []
+
+            for _, row in df.iterrows():
+
+                score, _, _ = (
+                    calculate_score(
+                        row
+                    )
+                )
+
+                scores.append(
+                    score
+                )
+
+                signals.append(
+
+                    determine_signal(
+                        row,
+                        score,
+                    )
+                )
+
+            df["SCORE"] = scores
+
+            df["MODEL_SIGNAL"] = (
+                signals
+            )
+
+            prepared[symbol] = df
+
+        except Exception as exc:
+
+            errors.append({
+                "symbol":
+                    symbol,
+
+                "error":
+                    str(exc),
+            })
+
+    if len(prepared) != len(ASSETS):
+
+        raise ValueError(
+            "Holdout testi için 10 varlığın tamamı "
+            "hazırlanamadı. "
+            f"Hazırlanan={len(prepared)}, "
+            f"Beklenen={len(ASSETS)}, "
+            f"Hatalar={errors}"
+        )
+
+    # ========================================================
+    # EXACT COMMON CALENDAR
+    # ========================================================
+
+    common_dates = None
+
+    for symbol, df in prepared.items():
+
+        dates = set(
+            df.index
+        )
+
+        if common_dates is None:
+
+            common_dates = dates
+
+        else:
+
+            common_dates = (
+                common_dates.intersection(
+                    dates
+                )
+            )
+
+    common_dates = sorted(
+        common_dates
+    )
+
+    if not common_dates:
+
+        raise ValueError(
+            "Ortak işlem tarihi bulunamadı."
+        )
+
+    # ========================================================
+    # HOLDOUT WINDOW
+    #
+    # Existing research begins:
+    #
+    # 2016-09-26
+    #
+    # Therefore holdout must END before that date.
+    # ========================================================
+
+    research_start = pd.Timestamp(
+        "2016-09-26"
+    )
+
+    holdout_dates = [
+
+        d
+
+        for d in common_dates
+
+        if pd.Timestamp(d)
+        <
+        research_start
+    ]
+
+    if len(holdout_dates) < 500:
+
+        raise ValueError(
+            "Pre-2016 holdout için yeterli "
+            "ortak işlem günü bulunamadı."
+        )
+
+    return (
+        prepared,
+        holdout_dates,
+        errors,
+    )
+
+
+# ============================================================
+# V1.3 CONFIRM3 CANDIDATES
+# ============================================================
+
+def v13_pre2016_confirmed_candidates(
+    prepared,
+    common_dates,
+    signal_index,
+    entry_score=75,
+    confirmation_days=3,
+):
+
+    candidates = []
+
+    # --------------------------------------------------------
+    # Need current day + previous confirmation days
+    # --------------------------------------------------------
+
+    if (
+        signal_index
+        <
+        confirmation_days - 1
+    ):
+
+        return candidates
+
+    signal_date = (
+        common_dates[
+            signal_index
+        ]
+    )
+
+    confirmation_dates = (
+
+        common_dates[
+            signal_index
+            -
+            confirmation_days
+            +
+            1
+            :
+            signal_index
+            +
+            1
+        ]
+    )
+
+    for symbol, df in (
+        prepared.items()
+    ):
+
+        confirmed = True
+
+        # ----------------------------------------------------
+        # Frozen V1.3 rule:
+        #
+        # AL_ADAYI + score >= 75
+        # for THREE consecutive closes
+        # ----------------------------------------------------
+
+        for d in confirmation_dates:
+
+            if d not in df.index:
+
+                confirmed = False
+                break
+
+            row = df.loc[d]
+
+            if (
+                int(
+                    row["SCORE"]
+                )
+                <
+                entry_score
+            ):
+
+                confirmed = False
+                break
+
+            if (
+                row["MODEL_SIGNAL"]
+                !=
+                "AL_ADAYI"
+            ):
+
+                confirmed = False
+                break
+
+        if not confirmed:
+
+            continue
+
+        row = df.loc[
+            signal_date
+        ]
+
+        candidates.append({
+
+            "symbol":
+                symbol,
+
+            "score":
+                int(
+                    row["SCORE"]
+                ),
+
+            "mom120":
+                float(
+                    row["MOM120"]
+                ),
+
+            "mom60":
+                float(
+                    row["MOM60"]
+                ),
+
+            "mom20":
+                float(
+                    row["MOM20"]
+                ),
+        })
+
+    # --------------------------------------------------------
+    # Frozen ranking
+    # --------------------------------------------------------
+
+    candidates.sort(
+
+        key=lambda x: (
+
+            x["score"],
+
+            x["mom120"],
+
+            x["mom60"],
+
+            x["mom20"],
+        ),
+
+        reverse=True,
+    )
+
+    return candidates
+
+
+# ============================================================
+# V1.3 PRE-2016 TOP-2 STICKY ENGINE
+# ============================================================
+
+def run_v13_pre2016_holdout_engine(
+    prepared,
+    common_dates,
+    entry_score=75,
+    exit_score=50,
+    transaction_cost_pct=0.10,
+    confirmation_days=3,
+):
+
+    top_n = 2
+
+    cost = (
+        transaction_cost_pct
+        /
+        100
+    )
+
+    equity = 1.0
+    peak = 1.0
+    max_drawdown = 0.0
+
+    holdings = {}
+
+    trades = []
+    rebalances = []
+    equity_curve = []
+
+    cash_days = 0
+    invested_days = 0
+
+    rotation_count = 0
+    entry_count = 0
+    exit_count = 0
+
+    # ========================================================
+    # LOOP
+    #
+    # Signal at today's CLOSE.
+    # Execution at NEXT trading day's OPEN.
+    # ========================================================
+
+    for i in range(
+        len(common_dates) - 1
+    ):
+
+        signal_date = (
+            common_dates[i]
+        )
+
+        next_date = (
+            common_dates[i + 1]
+        )
+
+        # ====================================================
+        # OPEN -> NEXT OPEN MARK TO MARKET
+        # ====================================================
+
+        if holdings:
+
+            weight = (
+                1.0
+                /
+                top_n
+            )
+
+            daily_return = 0.0
+
+            for symbol in list(
+                holdings.keys()
+            ):
+
+                df = (
+                    prepared[symbol]
+                )
+
+                current_open = float(
+
+                    df.loc[
+                        signal_date,
+                        "Open",
+                    ]
+                )
+
+                next_open = float(
+
+                    df.loc[
+                        next_date,
+                        "Open",
+                    ]
+                )
+
+                if current_open > 0:
+
+                    daily_return += (
+
+                        (
+                            next_open
+                            /
+                            current_open
+                            -
+                            1
+                        )
+
+                        *
+
+                        weight
+                    )
+
+            equity *= (
+                1
+                +
+                daily_return
+            )
+
+        # ====================================================
+        # HOLDING STATE FOR THIS DAY
+        # ====================================================
+
+        if holdings:
+
+            invested_days += 1
+
+        else:
+
+            cash_days += 1
+
+        # ====================================================
+        # FROZEN SLOW EXIT
+        # ====================================================
+
+        old_symbols = list(
+            holdings.keys()
+        )
+
+        exiting = []
+
+        for symbol in old_symbols:
+
+            row = (
+                prepared[symbol]
+                .loc[
+                    signal_date
+                ]
+            )
+
+            if rotation_exit_required(
+                row,
+                exit_score,
+            ):
+
+                exiting.append(
+                    symbol
+                )
+
+        survivors = [
+
+            symbol
+
+            for symbol in old_symbols
+
+            if symbol not in exiting
+        ]
+
+        # ====================================================
+        # V1.3 CONFIRM3 RANKING
+        #
+        # Ranking ONLY fills empty slots.
+        #
+        # Existing survivor is NOT displaced by a stronger
+        # ranked commodity.
+        # ====================================================
+
+        candidates = (
+            v13_pre2016_confirmed_candidates(
+                prepared=
+                    prepared,
+
+                common_dates=
+                    common_dates,
+
+                signal_index=
+                    i,
+
+                entry_score=
+                    entry_score,
+
+                confirmation_days=
+                    confirmation_days,
+            )
+        )
+
+        candidate_symbols = [
+
+            x["symbol"]
+
+            for x in candidates
+        ]
+
+        next_symbols = list(
+            survivors
+        )
+
+        entering = []
+
+        free_slots = max(
+
+            0,
+
+            top_n
+            -
+            len(
+                next_symbols
+            ),
+        )
+
+        if free_slots > 0:
+
+            for symbol in (
+                candidate_symbols
+            ):
+
+                if symbol in next_symbols:
+                    continue
+
+                entering.append(
+                    symbol
+                )
+
+                next_symbols.append(
+                    symbol
+                )
+
+                if (
+                    len(entering)
+                    >=
+                    free_slots
+                ):
+                    break
+
+        # ====================================================
+        # EXECUTE EXITS AT NEXT OPEN
+        # ====================================================
+
+        for symbol in exiting:
+
+            if symbol not in holdings:
+                continue
+
+            df = (
+                prepared[symbol]
+            )
+
+            exit_price = float(
+
+                df.loc[
+                    next_date,
+                    "Open",
+                ]
+            )
+
+            position = (
+                holdings[symbol]
+            )
+
+            entry_price = float(
+                position[
+                    "entry_price"
+                ]
+            )
+
+            entry_date = (
+                position[
+                    "entry_date"
+                ]
+            )
+
+            # -----------------------------------------------
+            # Trade return including BOTH transaction costs
+            # -----------------------------------------------
+
+            gross_return = (
+                exit_price
+                /
+                entry_price
+                -
+                1
+            )
+
+            net_return = (
+
+                (
+                    1
+                    +
+                    gross_return
+                )
+
+                *
+
+                (
+                    1
+                    -
+                    cost
+                )
+
+                /
+
+                (
+                    1
+                    +
+                    cost
+                )
+
+                -
+                1
+            )
+
+            holding_days = (
+
+                pd.Timestamp(
+                    next_date
+                )
+
+                -
+
+                pd.Timestamp(
+                    entry_date
+                )
+
+            ).days
+
+            trades.append({
+
+                "symbol":
+                    symbol,
+
+                "entry_date":
+                    str(
+                        pd.Timestamp(
+                            entry_date
+                        ).date()
+                    ),
+
+                "exit_date":
+                    str(
+                        pd.Timestamp(
+                            next_date
+                        ).date()
+                    ),
+
+                "entry_price":
+                    safe_float(
+                        entry_price,
+                        4,
+                    ),
+
+                "exit_price":
+                    safe_float(
+                        exit_price,
+                        4,
+                    ),
+
+                "return_pct":
+                    safe_float(
+                        net_return
+                        *
+                        100,
+                        2,
+                    ),
+
+                "holding_days":
+                    holding_days,
+
+                "exit_reason":
+                    "V1.2A_SLOW_EXIT",
+            })
+
+            # -----------------------------------------------
+            # Apply exit transaction cost to portfolio equity
+            # Weight = 1 / Top2
+            # -----------------------------------------------
+
+            equity *= (
+
+                1
+                -
+                (
+                    cost
+                    /
+                    top_n
+                )
+            )
+
+            del holdings[
+                symbol
+            ]
+
+            exit_count += 1
+
+        # ====================================================
+        # EXECUTE ENTRIES AT NEXT OPEN
+        # ====================================================
+
+        for symbol in entering:
+
+            if symbol in holdings:
+                continue
+
+            df = (
+                prepared[symbol]
+            )
+
+            entry_price = float(
+
+                df.loc[
+                    next_date,
+                    "Open",
+                ]
+            )
+
+            if entry_price <= 0:
+                continue
+
+            holdings[
+                symbol
+            ] = {
+
+                "entry_date":
+                    next_date,
+
+                "entry_price":
+                    entry_price,
+
+                "signal_date":
+                    signal_date,
+            }
+
+            # -----------------------------------------------
+            # Apply entry transaction cost
+            # -----------------------------------------------
+
+            equity *= (
+
+                1
+                -
+                (
+                    cost
+                    /
+                    top_n
+                )
+            )
+
+            entry_count += 1
+
+        # ====================================================
+        # ROTATION COUNT
+        # ====================================================
+
+        if (
+            exiting
+            and
+            entering
+        ):
+
+            rotation_count += 1
+
+        if (
+            exiting
+            or
+            entering
+        ):
+
+            rebalances.append({
+
+                "signal_date":
+                    str(
+                        pd.Timestamp(
+                            signal_date
+                        ).date()
+                    ),
+
+                "execution_date":
+                    str(
+                        pd.Timestamp(
+                            next_date
+                        ).date()
+                    ),
+
+                "exiting":
+                    exiting,
+
+                "entering":
+                    entering,
+
+                "holdings_after":
+                    list(
+                        holdings.keys()
+                    ),
+            })
+
+        # ====================================================
+        # DAILY DRAWDOWN
+        # ====================================================
+
+        if equity > peak:
+
+            peak = equity
+
+        if peak > 0:
+
+            drawdown = (
+
+                equity
+                /
+                peak
+                -
+                1
+            )
+
+            max_drawdown = min(
+
+                max_drawdown,
+
+                drawdown,
+            )
+
+        equity_curve.append({
+
+            "date":
+                str(
+                    pd.Timestamp(
+                        next_date
+                    ).date()
+                ),
+
+            "equity":
+                safe_float(
+                    equity,
+                    6,
+                ),
+
+            "drawdown_pct":
+                safe_float(
+                    drawdown
+                    *
+                    100
+                    if peak > 0
+                    else 0,
+                    2,
+                ),
+
+            "holdings":
+                list(
+                    holdings.keys()
+                ),
+        })
+
+    # ========================================================
+    # FORCE CLOSE REMAINING POSITIONS
+    #
+    # Same principle as historical backtests:
+    # close remaining positions on final available close.
+    # ========================================================
+
+    final_date = (
+        common_dates[-1]
+    )
+
+    for symbol in list(
+        holdings.keys()
+    ):
+
+        df = (
+            prepared[symbol]
+        )
+
+        final_price = float(
+
+            df.loc[
+                final_date,
+                "Close",
+            ]
+        )
+
+        position = (
+            holdings[symbol]
+        )
+
+        entry_price = float(
+            position[
+                "entry_price"
+            ]
+        )
+
+        entry_date = (
+            position[
+                "entry_date"
+            ]
+        )
+
+        gross_return = (
+
+            final_price
+            /
+            entry_price
+            -
+            1
+        )
+
+        net_return = (
+
+            (
+                1
+                +
+                gross_return
+            )
+
+            *
+
+            (
+                1
+                -
+                cost
+            )
+
+            /
+
+            (
+                1
+                +
+                cost
+            )
+
+            -
+            1
+        )
+
+        holding_days = (
+
+            pd.Timestamp(
+                final_date
+            )
+
+            -
+
+            pd.Timestamp(
+                entry_date
+            )
+
+        ).days
+
+        trades.append({
+
+            "symbol":
+                symbol,
+
+            "entry_date":
+                str(
+                    pd.Timestamp(
+                        entry_date
+                    ).date()
+                ),
+
+            "exit_date":
+                str(
+                    pd.Timestamp(
+                        final_date
+                    ).date()
+                ),
+
+            "entry_price":
+                safe_float(
+                    entry_price,
+                    4,
+                ),
+
+            "exit_price":
+                safe_float(
+                    final_price,
+                    4,
+                ),
+
+            "return_pct":
+                safe_float(
+                    net_return
+                    *
+                    100,
+                    2,
+                ),
+
+            "holding_days":
+                holding_days,
+
+            "exit_reason":
+                "FORCED_FINAL_CLOSE",
+        })
+
+        # ----------------------------------------------------
+        # Mark final open -> close for remaining holding
+        # ----------------------------------------------------
+
+        final_open = float(
+
+            df.loc[
+                final_date,
+                "Open",
+            ]
+        )
+
+        if final_open > 0:
+
+            final_intraday_return = (
+
+                final_price
+                /
+                final_open
+                -
+                1
+            )
+
+            equity *= (
+
+                1
+
+                +
+
+                (
+                    final_intraday_return
+                    /
+                    top_n
+                )
+            )
+
+        equity *= (
+
+            1
+            -
+            (
+                cost
+                /
+                top_n
+            )
+        )
+
+        exit_count += 1
+
+        del holdings[
+            symbol
+        ]
+
+    # ========================================================
+    # FINAL DRAWDOWN UPDATE
+    # ========================================================
+
+    if equity > peak:
+
+        peak = equity
+
+    if peak > 0:
+
+        final_drawdown = (
+
+            equity
+            /
+            peak
+            -
+            1
+        )
+
+        max_drawdown = min(
+
+            max_drawdown,
+
+            final_drawdown,
+        )
+
+    # ========================================================
+    # TRADE STATISTICS
+    # ========================================================
+
+    trade_returns = [
+
+        float(
+            x["return_pct"]
+        )
+
+        for x in trades
+
+        if x.get(
+            "return_pct"
+        )
+        is not None
+    ]
+
+    winning_returns = [
+
+        x
+
+        for x in trade_returns
+
+        if x > 0
+    ]
+
+    losing_returns = [
+
+        x
+
+        for x in trade_returns
+
+        if x < 0
+    ]
+
+    trade_count = len(
+        trade_returns
+    )
+
+    win_rate = (
+
+        len(
+            winning_returns
+        )
+
+        /
+        trade_count
+
+        *
+        100
+
+        if trade_count
+        else 0
+    )
+
+    average_trade = (
+
+        float(
+            np.mean(
+                trade_returns
+            )
+        )
+
+        if trade_returns
+        else 0
+    )
+
+    median_trade = (
+
+        float(
+            np.median(
+                trade_returns
+            )
+        )
+
+        if trade_returns
+        else 0
+    )
+
+    holding_values = [
+
+        float(
+            x["holding_days"]
+        )
+
+        for x in trades
+    ]
+
+    average_holding = (
+
+        float(
+            np.mean(
+                holding_values
+            )
+        )
+
+        if holding_values
+        else 0
+    )
+
+    gross_profit = sum(
+        winning_returns
+    )
+
+    gross_loss = abs(
+        sum(
+            losing_returns
+        )
+    )
+
+    if gross_loss > 0:
+
+        profit_factor = (
+            gross_profit
+            /
+            gross_loss
+        )
+
+    elif gross_profit > 0:
+
+        profit_factor = 999.0
+
+    else:
+
+        profit_factor = 0.0
+
+    # ========================================================
+    # PERFORMANCE
+    # ========================================================
+
+    total_return = (
+
+        equity
+        -
+        1
+    ) * 100
+
+    start_date = pd.Timestamp(
+        common_dates[0]
+    )
+
+    end_date = pd.Timestamp(
+        common_dates[-1]
+    )
+
+    elapsed_years = (
+
+        (
+            end_date
+            -
+            start_date
+        ).days
+
+        /
+        365.25
+    )
+
+    if (
+        elapsed_years > 0
+        and
+        equity > 0
+    ):
+
+        cagr = (
+
+            equity
+            **
+            (
+                1
+                /
+                elapsed_years
+            )
+
+            -
+            1
+
+        ) * 100
+
+    else:
+
+        cagr = None
+
+    active_days = (
+
+        cash_days
+        +
+        invested_days
+    )
+
+    cash_pct = (
+
+        cash_days
+        /
+        active_days
+        *
+        100
+
+        if active_days
+        else 0
+    )
+
+    invested_pct = (
+
+        invested_days
+        /
+        active_days
+        *
+        100
+
+        if active_days
+        else 0
+    )
+
+    return {
+
+        "portfolio":
+            "TOP_2_EQUAL_WEIGHT",
+
+        "rotation_model":
+            "V1.3_CONFIRM3_STICKY",
+
+        "performance": {
+
+            "strategy_total_return_pct":
+                safe_float(
+                    total_return,
+                    2,
+                ),
+
+            "strategy_cagr_pct":
+                safe_float(
+                    cagr,
+                    2,
+                ),
+
+            "max_drawdown_daily_pct":
+                safe_float(
+                    max_drawdown
+                    *
+                    100,
+                    2,
+                ),
+
+            "trade_count":
+                trade_count,
+
+            "win_rate_pct":
+                safe_float(
+                    win_rate,
+                    2,
+                ),
+
+            "profit_factor":
+                safe_float(
+                    profit_factor,
+                    3,
+                ),
+
+            "average_trade_pct":
+                safe_float(
+                    average_trade,
+                    2,
+                ),
+
+            "median_trade_pct":
+                safe_float(
+                    median_trade,
+                    2,
+                ),
+
+            "average_holding_days":
+                safe_float(
+                    average_holding,
+                    1,
+                ),
+
+            "entry_count":
+                entry_count,
+
+            "exit_count":
+                exit_count,
+
+            "rotation_count":
+                rotation_count,
+
+            "cash_days":
+                cash_days,
+
+            "cash_time_pct":
+                safe_float(
+                    cash_pct,
+                    2,
+                ),
+
+            "invested_time_pct":
+                safe_float(
+                    invested_pct,
+                    2,
+                ),
+
+            "final_equity":
+                safe_float(
+                    equity,
+                    6,
+                ),
+        },
+
+        "trades":
+            trades,
+
+        "rebalances":
+            rebalances,
+
+        "equity_curve":
+            equity_curve,
+    }
+
+
+# ============================================================
+# V1.3 PRE-2016 HOLDOUT
+# ============================================================
+
+def run_v13_pre2016_holdout():
+
+    entry_score = 75
+    exit_score = 50
+    confirmation_days = 3
+    transaction_cost_pct = 0.10
+
+    (
+        prepared,
+        holdout_dates,
+        errors,
+    ) = (
+        v13_pre2016_prepare_data()
+    )
+
+    # ========================================================
+    # RUN FROZEN TOP-2 V1.3
+    # ========================================================
+
+    result = (
+        run_v13_pre2016_holdout_engine(
+
+            prepared=
+                prepared,
+
+            common_dates=
+                holdout_dates,
+
+            entry_score=
+                entry_score,
+
+            exit_score=
+                exit_score,
+
+            transaction_cost_pct=
+                transaction_cost_pct,
+
+            confirmation_days=
+                confirmation_days,
+        )
+    )
+
+    # ========================================================
+    # DBC BUY & HOLD BENCHMARK
+    # ========================================================
+
+    dbc_return = None
+
+    if "DBC" in prepared:
+
+        dbc = (
+            prepared["DBC"]
+        )
+
+        first_date = (
+            holdout_dates[0]
+        )
+
+        last_date = (
+            holdout_dates[-1]
+        )
+
+        first_open = float(
+
+            dbc.loc[
+                first_date,
+                "Open",
+            ]
+        )
+
+        last_close = float(
+
+            dbc.loc[
+                last_date,
+                "Close",
+            ]
+        )
+
+        if first_open > 0:
+
+            dbc_return = (
+
+                last_close
+                /
+                first_open
+                -
+                1
+
+            ) * 100
+
+    # ========================================================
+    # SYMBOL TRADE SUMMARY
+    # ========================================================
+
+    symbol_summary = {}
+
+    for trade in result["trades"]:
+
+        symbol = (
+            trade["symbol"]
+        )
+
+        if symbol not in symbol_summary:
+
+            symbol_summary[
+                symbol
+            ] = {
+
+                "trade_count":
+                    0,
+
+                "winner_count":
+                    0,
+
+                "loser_count":
+                    0,
+
+                "total_trade_return_pct":
+                    0.0,
+            }
+
+        item = (
+            symbol_summary[
+                symbol
+            ]
+        )
+
+        item[
+            "trade_count"
+        ] += 1
+
+        trade_return = float(
+            trade[
+                "return_pct"
+            ]
+        )
+
+        item[
+            "total_trade_return_pct"
+        ] += (
+            trade_return
+        )
+
+        if trade_return > 0:
+
+            item[
+                "winner_count"
+            ] += 1
+
+        elif trade_return < 0:
+
+            item[
+                "loser_count"
+            ] += 1
+
+    for symbol, item in (
+        symbol_summary.items()
+    ):
+
+        count = (
+            item[
+                "trade_count"
+            ]
+        )
+
+        winners = (
+            item[
+                "winner_count"
+            ]
+        )
+
+        item[
+            "win_rate_pct"
+        ] = (
+
+            safe_float(
+                winners
+                /
+                count
+                *
+                100,
+                2,
+            )
+
+            if count
+            else 0
+        )
+
+        item[
+            "total_trade_return_pct"
+        ] = safe_float(
+
+            item[
+                "total_trade_return_pct"
+            ],
+
+            2,
+        )
+
+    # ========================================================
+    # RETURN
+    # ========================================================
+
+    return {
+
+        "test":
+            "V1.3_PRE_2016_HISTORICAL_HOLDOUT",
+
+        "model":
+            "V1.3_CONFIRM3",
+
+        "generated_at_utc":
+            utc_now(),
+
+        "purpose":
+            (
+                "Evaluate frozen V1.3 CONFIRM3 on "
+                "historical data before the existing "
+                "2016-09-26 research window."
+            ),
+
+        "methodology": {
+
+            "parameter_optimization":
+                False,
+
+            "strategy_modified":
+                False,
+
+            "v14_breadth_filter":
+                False,
+
+            "v15_overextension_filter":
+                False,
+
+            "portfolio":
+                "TOP_2_EQUAL_WEIGHT",
+
+            "sticky_rotation":
+                True,
+
+            "entry_score":
+                entry_score,
+
+            "exit_score":
+                exit_score,
+
+            "confirmation_days":
+                confirmation_days,
+
+            "transaction_cost_pct_each_side":
+                transaction_cost_pct,
+
+            "ranking":
+                "SCORE, MOM120, MOM60, MOM20",
+
+            "entry_rule":
+                (
+                    "AL_ADAYI and score >= 75 "
+                    "for 3 consecutive closes"
+                ),
+
+            "exit_rule":
+                (
+                    "score <= 50 OR EMA20 < EMA50 "
+                    "OR Close < EMA100 "
+                    "OR EMA50 < EMA200"
+                ),
+
+            "holding_rule":
+                (
+                    "Existing holding remains until "
+                    "its own slow-exit. Ranking only "
+                    "fills empty slots."
+                ),
+
+            "execution":
+                (
+                    "Signal at close, execution at "
+                    "next trading day open"
+                ),
+
+            "long_only":
+                True,
+
+            "leverage":
+                False,
+
+            "automatic_orders":
+                False,
+        },
+
+        "holdout_period": {
+
+            "start":
+                str(
+                    pd.Timestamp(
+                        holdout_dates[0]
+                    ).date()
+                ),
+
+            "end":
+                str(
+                    pd.Timestamp(
+                        holdout_dates[-1]
+                    ).date()
+                ),
+
+            "common_trading_days":
+                len(
+                    holdout_dates
+                ),
+
+            "research_window_starts":
+                "2016-09-26",
+        },
+
+        "benchmark_reference": {
+
+            "symbol":
+                "DBC",
+
+            "buy_hold_return_pct":
+                safe_float(
+                    dbc_return,
+                    2,
+                ),
+        },
+
+        "performance":
+            result[
+                "performance"
+            ],
+
+        "symbol_summary":
+            symbol_summary,
+
+        "trades":
+            result[
+                "trades"
+            ],
+
+        "rebalances":
+            result[
+                "rebalances"
+            ],
+
+        "equity_curve":
+            result[
+                "equity_curve"
+            ],
+
+        "data_errors":
+            errors,
+
+        "interpretation_warning":
+            (
+                "This period is being used as a historical "
+                "holdout for V1.3. Do not optimize V1.3 "
+                "parameters using this result."
+            ),
+    }
+
+
+# ============================================================
+# API ENDPOINT
+# ============================================================
+
+@app.get("/v13-pre2016-holdout")
+def v13_pre2016_holdout_endpoint():
+
+    try:
+
+        return (
+            run_v13_pre2016_holdout()
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
