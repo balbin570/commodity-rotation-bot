@@ -12142,3 +12142,1178 @@ def v13_pre2016_holdout_endpoint():
             status_code=400,
             detail=str(exc),
         )
+
+# ============================================================
+# V1.3 PRE-2016 HOLDOUT ENTRY-FEATURE DIAGNOSTIC
+# ============================================================
+#
+# PURPOSE
+# -------
+# Diagnostic only.
+#
+# Re-run the frozen V1.3 pre-2016 holdout and attach
+# SIGNAL-DATE-CLOSE features to every trade.
+#
+# IMPORTANT
+# ---------
+# NO strategy modification.
+# NO parameter optimization.
+# NO new trading filter.
+# NO threshold search.
+#
+# We specifically want to test whether the previously observed
+# hypothesis:
+#
+#     excessive MOM60 + high ATR%
+#
+# is also visible in the independent pre-2016 holdout.
+#
+# Features are taken from the SIGNAL CLOSE immediately before
+# next-open execution.
+# ============================================================
+
+
+def v13_pre2016_entry_feature_snapshot(
+    prepared,
+    symbol,
+    entry_date,
+):
+
+    if symbol not in prepared:
+
+        return None
+
+    df = prepared[symbol]
+
+    entry_ts = pd.Timestamp(
+        entry_date
+    )
+
+    # --------------------------------------------------------
+    # Entry occurs at NEXT OPEN.
+    #
+    # Therefore diagnostic features must come from the most
+    # recent trading CLOSE strictly BEFORE entry_date.
+    #
+    # This avoids look-ahead.
+    # --------------------------------------------------------
+
+    previous_dates = df.index[
+        df.index < entry_ts
+    ]
+
+    if len(previous_dates) == 0:
+
+        return None
+
+    signal_date = (
+        previous_dates[-1]
+    )
+
+    row = df.loc[
+        signal_date
+    ]
+
+    # --------------------------------------------------------
+    # Safe helper local to diagnostic
+    # --------------------------------------------------------
+
+    def diag_float(
+        value,
+        digits=4,
+    ):
+
+        try:
+
+            if pd.isna(value):
+
+                return None
+
+            return round(
+                float(value),
+                digits,
+            )
+
+        except Exception:
+
+            return None
+
+    # ========================================================
+    # DERIVED EMA SPREADS
+    # ========================================================
+
+    ema20 = diag_float(
+        row.get("EMA20")
+    )
+
+    ema50 = diag_float(
+        row.get("EMA50")
+    )
+
+    ema100 = diag_float(
+        row.get("EMA100")
+    )
+
+    ema200 = diag_float(
+        row.get("EMA200")
+    )
+
+    close = diag_float(
+        row.get("Close")
+    )
+
+    ema20_vs_ema50_pct = None
+    ema50_vs_ema200_pct = None
+    ema20_vs_ema200_pct = None
+    dist_ema100_pct = None
+
+    if (
+        ema20 is not None
+        and
+        ema50 is not None
+        and
+        ema50 != 0
+    ):
+
+        ema20_vs_ema50_pct = round(
+
+            (
+                ema20
+                /
+                ema50
+                -
+                1
+            )
+            *
+            100,
+
+            4,
+        )
+
+    if (
+        ema50 is not None
+        and
+        ema200 is not None
+        and
+        ema200 != 0
+    ):
+
+        ema50_vs_ema200_pct = round(
+
+            (
+                ema50
+                /
+                ema200
+                -
+                1
+            )
+            *
+            100,
+
+            4,
+        )
+
+    if (
+        ema20 is not None
+        and
+        ema200 is not None
+        and
+        ema200 != 0
+    ):
+
+        ema20_vs_ema200_pct = round(
+
+            (
+                ema20
+                /
+                ema200
+                -
+                1
+            )
+            *
+            100,
+
+            4,
+        )
+
+    if (
+        close is not None
+        and
+        ema100 is not None
+        and
+        ema100 != 0
+    ):
+
+        dist_ema100_pct = round(
+
+            (
+                close
+                /
+                ema100
+                -
+                1
+            )
+            *
+            100,
+
+            4,
+        )
+
+    # ========================================================
+    # SNAPSHOT
+    # ========================================================
+
+    return {
+
+        "signal_date":
+            str(
+                pd.Timestamp(
+                    signal_date
+                ).date()
+            ),
+
+        "score":
+            diag_float(
+                row.get(
+                    "SCORE"
+                ),
+                2,
+            ),
+
+        "model_signal":
+            (
+                str(
+                    row.get(
+                        "MODEL_SIGNAL"
+                    )
+                )
+                if row.get(
+                    "MODEL_SIGNAL"
+                )
+                is not None
+                else None
+            ),
+
+        "mom20":
+            diag_float(
+                row.get(
+                    "MOM20"
+                )
+            ),
+
+        "mom60":
+            diag_float(
+                row.get(
+                    "MOM60"
+                )
+            ),
+
+        "mom120":
+            diag_float(
+                row.get(
+                    "MOM120"
+                )
+            ),
+
+        "rsi14":
+            diag_float(
+                row.get(
+                    "RSI14"
+                )
+            ),
+
+        "macd":
+            diag_float(
+                row.get(
+                    "MACD"
+                )
+            ),
+
+        "macd_signal":
+            diag_float(
+                row.get(
+                    "MACD_SIGNAL"
+                )
+            ),
+
+        "macd_hist":
+            diag_float(
+                row.get(
+                    "MACD_HIST"
+                )
+            ),
+
+        "atr14":
+            diag_float(
+                row.get(
+                    "ATR14"
+                )
+            ),
+
+        "atr_pct":
+            diag_float(
+                row.get(
+                    "ATR_PCT"
+                )
+            ),
+
+        "volume_ratio":
+            diag_float(
+                row.get(
+                    "VOLUME_RATIO"
+                )
+            ),
+
+        "dist_ema20_pct":
+            diag_float(
+                row.get(
+                    "DIST_EMA20"
+                )
+            ),
+
+        "dist_ema50_pct":
+            diag_float(
+                row.get(
+                    "DIST_EMA50"
+                )
+            ),
+
+        "dist_ema100_pct":
+            dist_ema100_pct,
+
+        "dist_ema200_pct":
+            diag_float(
+                row.get(
+                    "DIST_EMA200"
+                )
+            ),
+
+        "ema20_vs_ema50_pct":
+            ema20_vs_ema50_pct,
+
+        "ema50_vs_ema200_pct":
+            ema50_vs_ema200_pct,
+
+        "ema20_vs_ema200_pct":
+            ema20_vs_ema200_pct,
+
+        "drawdown_252_pct":
+            diag_float(
+                row.get(
+                    "DRAWDOWN_252"
+                )
+            ),
+    }
+
+
+# ============================================================
+# GROUP STATISTICS
+# ============================================================
+
+def v13_pre2016_group_statistics(
+    trades,
+):
+
+    feature_names = [
+
+        "score",
+
+        "mom20",
+        "mom60",
+        "mom120",
+
+        "rsi14",
+
+        "macd",
+        "macd_signal",
+        "macd_hist",
+
+        "atr_pct",
+
+        "volume_ratio",
+
+        "dist_ema20_pct",
+        "dist_ema50_pct",
+        "dist_ema100_pct",
+        "dist_ema200_pct",
+
+        "ema20_vs_ema50_pct",
+        "ema50_vs_ema200_pct",
+        "ema20_vs_ema200_pct",
+
+        "drawdown_252_pct",
+    ]
+
+    def summarize_group(
+        group,
+    ):
+
+        output = {
+
+            "trade_count":
+                len(group),
+
+            "features":
+                {},
+        }
+
+        for feature in feature_names:
+
+            values = [
+
+                float(
+                    trade[
+                        feature
+                    ]
+                )
+
+                for trade in group
+
+                if trade.get(
+                    feature
+                )
+                is not None
+            ]
+
+            if not values:
+
+                output[
+                    "features"
+                ][feature] = {
+
+                    "n":
+                        0,
+
+                    "mean":
+                        None,
+
+                    "median":
+                        None,
+
+                    "min":
+                        None,
+
+                    "max":
+                        None,
+                }
+
+                continue
+
+            output[
+                "features"
+            ][feature] = {
+
+                "n":
+                    len(values),
+
+                "mean":
+                    round(
+                        float(
+                            np.mean(
+                                values
+                            )
+                        ),
+                        4,
+                    ),
+
+                "median":
+                    round(
+                        float(
+                            np.median(
+                                values
+                            )
+                        ),
+                        4,
+                    ),
+
+                "min":
+                    round(
+                        float(
+                            np.min(
+                                values
+                            )
+                        ),
+                        4,
+                    ),
+
+                "max":
+                    round(
+                        float(
+                            np.max(
+                                values
+                            )
+                        ),
+                        4,
+                    ),
+            }
+
+        return output
+
+    winners = [
+
+        trade
+
+        for trade in trades
+
+        if float(
+            trade[
+                "return_pct"
+            ]
+        ) > 0
+    ]
+
+    losers = [
+
+        trade
+
+        for trade in trades
+
+        if float(
+            trade[
+                "return_pct"
+            ]
+        ) <= 0
+    ]
+
+    winner_summary = (
+        summarize_group(
+            winners
+        )
+    )
+
+    loser_summary = (
+        summarize_group(
+            losers
+        )
+    )
+
+    # ========================================================
+    # WINNER MINUS LOSER
+    # ========================================================
+
+    differences = {}
+
+    for feature in feature_names:
+
+        winner_mean = (
+
+            winner_summary[
+                "features"
+            ][feature][
+                "mean"
+            ]
+        )
+
+        loser_mean = (
+
+            loser_summary[
+                "features"
+            ][feature][
+                "mean"
+            ]
+        )
+
+        if (
+            winner_mean is None
+            or
+            loser_mean is None
+        ):
+
+            differences[
+                feature
+            ] = None
+
+        else:
+
+            differences[
+                feature
+            ] = round(
+
+                winner_mean
+                -
+                loser_mean,
+
+                4,
+            )
+
+    return {
+
+        "all_trade_count":
+            len(trades),
+
+        "winner_count":
+            len(winners),
+
+        "loser_count":
+            len(losers),
+
+        "winners":
+            winner_summary,
+
+        "losers":
+            loser_summary,
+
+        "winner_minus_loser_mean":
+            differences,
+    }
+
+
+# ============================================================
+# MOM60 + ATR DESCRIPTIVE JOINT ANALYSIS
+# ============================================================
+
+def v13_pre2016_mom60_atr_analysis(
+    trades,
+):
+
+    valid = [
+
+        trade
+
+        for trade in trades
+
+        if (
+            trade.get(
+                "mom60"
+            )
+            is not None
+
+            and
+
+            trade.get(
+                "atr_pct"
+            )
+            is not None
+        )
+    ]
+
+    if not valid:
+
+        return {
+
+            "status":
+                "NO_VALID_TRADES"
+        }
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    #
+    # This section is DESCRIPTIVE ONLY.
+    #
+    # We are NOT deriving trading thresholds from the
+    # pre-2016 holdout.
+    # --------------------------------------------------------
+
+    sorted_by_mom60 = sorted(
+
+        valid,
+
+        key=lambda x:
+            float(
+                x[
+                    "mom60"
+                ]
+            ),
+    )
+
+    sorted_by_atr = sorted(
+
+        valid,
+
+        key=lambda x:
+            float(
+                x[
+                    "atr_pct"
+                ]
+            ),
+    )
+
+    # ========================================================
+    # Highest observations
+    #
+    # No quartile-based trading rule is created.
+    # ========================================================
+
+    highest_mom60 = sorted(
+
+        valid,
+
+        key=lambda x:
+            float(
+                x[
+                    "mom60"
+                ]
+            ),
+
+        reverse=True,
+    )
+
+    highest_atr = sorted(
+
+        valid,
+
+        key=lambda x:
+            float(
+                x[
+                    "atr_pct"
+                ]
+            ),
+
+        reverse=True,
+    )
+
+    compact_fields = [
+
+        "symbol",
+        "signal_date",
+        "entry_date",
+        "exit_date",
+
+        "return_pct",
+        "outcome",
+
+        "mom60",
+        "atr_pct",
+
+        "mom20",
+        "mom120",
+
+        "ema20_vs_ema50_pct",
+
+        "dist_ema200_pct",
+
+        "drawdown_252_pct",
+    ]
+
+    def compact(
+        trade,
+    ):
+
+        return {
+
+            key:
+                trade.get(
+                    key
+                )
+
+            for key in compact_fields
+        }
+
+    # --------------------------------------------------------
+    # Correlations are diagnostic only.
+    # Small n = interpret cautiously.
+    # --------------------------------------------------------
+
+    returns = np.array(
+        [
+            float(
+                x[
+                    "return_pct"
+                ]
+            )
+            for x in valid
+        ],
+        dtype=float,
+    )
+
+    mom60_values = np.array(
+        [
+            float(
+                x[
+                    "mom60"
+                ]
+            )
+            for x in valid
+        ],
+        dtype=float,
+    )
+
+    atr_values = np.array(
+        [
+            float(
+                x[
+                    "atr_pct"
+                ]
+            )
+            for x in valid
+        ],
+        dtype=float,
+    )
+
+    def safe_corr(
+        a,
+        b,
+    ):
+
+        try:
+
+            if (
+                len(a) < 3
+                or
+                np.std(a) == 0
+                or
+                np.std(b) == 0
+            ):
+
+                return None
+
+            return round(
+
+                float(
+                    np.corrcoef(
+                        a,
+                        b,
+                    )[0, 1]
+                ),
+
+                4,
+            )
+
+        except Exception:
+
+            return None
+
+    return {
+
+        "status":
+            "OK",
+
+        "trade_count":
+            len(valid),
+
+        "warning":
+            (
+                "Descriptive holdout analysis only. "
+                "Do not derive or optimize thresholds "
+                "from these 16 trades."
+            ),
+
+        "correlation_with_trade_return": {
+
+            "mom60":
+                safe_corr(
+                    mom60_values,
+                    returns,
+                ),
+
+            "atr_pct":
+                safe_corr(
+                    atr_values,
+                    returns,
+                ),
+        },
+
+        "highest_mom60_trades": [
+
+            compact(x)
+
+            for x in
+            highest_mom60[:8]
+        ],
+
+        "highest_atr_trades": [
+
+            compact(x)
+
+            for x in
+            highest_atr[:8]
+        ],
+
+        "lowest_mom60_trades": [
+
+            compact(x)
+
+            for x in
+            sorted_by_mom60[:8]
+        ],
+
+        "lowest_atr_trades": [
+
+            compact(x)
+
+            for x in
+            sorted_by_atr[:8]
+        ],
+    }
+
+
+# ============================================================
+# COMPLETE PRE-2016 DIAGNOSTIC
+# ============================================================
+
+def run_v13_pre2016_feature_diagnostic():
+
+    # ========================================================
+    # Recreate EXACT frozen holdout
+    # ========================================================
+
+    (
+        prepared,
+        holdout_dates,
+        errors,
+    ) = (
+        v13_pre2016_prepare_data()
+    )
+
+    baseline = (
+        run_v13_pre2016_holdout_engine(
+
+            prepared=
+                prepared,
+
+            common_dates=
+                holdout_dates,
+
+            entry_score=
+                75,
+
+            exit_score=
+                50,
+
+            transaction_cost_pct=
+                0.10,
+
+            confirmation_days=
+                3,
+        )
+    )
+
+    diagnostic_trades = []
+
+    # ========================================================
+    # ATTACH SIGNAL-CLOSE FEATURES
+    # ========================================================
+
+    for original_trade in (
+        baseline[
+            "trades"
+        ]
+    ):
+
+        symbol = (
+            original_trade[
+                "symbol"
+            ]
+        )
+
+        entry_date = (
+            original_trade[
+                "entry_date"
+            ]
+        )
+
+        snapshot = (
+            v13_pre2016_entry_feature_snapshot(
+
+                prepared=
+                    prepared,
+
+                symbol=
+                    symbol,
+
+                entry_date=
+                    entry_date,
+            )
+        )
+
+        trade = dict(
+            original_trade
+        )
+
+        trade_return = float(
+            trade[
+                "return_pct"
+            ]
+        )
+
+        trade[
+            "outcome"
+        ] = (
+
+            "WINNER"
+
+            if trade_return > 0
+
+            else "LOSER"
+        )
+
+        if snapshot is not None:
+
+            trade.update(
+                snapshot
+            )
+
+        diagnostic_trades.append(
+            trade
+        )
+
+    # ========================================================
+    # GROUP ANALYSIS
+    # ========================================================
+
+    group_analysis = (
+        v13_pre2016_group_statistics(
+            diagnostic_trades
+        )
+    )
+
+    mom60_atr_analysis = (
+        v13_pre2016_mom60_atr_analysis(
+            diagnostic_trades
+        )
+    )
+
+    # ========================================================
+    # SORTED TRADE TABLE
+    # ========================================================
+
+    trades_best_to_worst = sorted(
+
+        diagnostic_trades,
+
+        key=lambda x:
+            float(
+                x[
+                    "return_pct"
+                ]
+            ),
+
+        reverse=True,
+    )
+
+    trades_worst_to_best = sorted(
+
+        diagnostic_trades,
+
+        key=lambda x:
+            float(
+                x[
+                    "return_pct"
+                ]
+            ),
+    )
+
+    # ========================================================
+    # RETURN
+    # ========================================================
+
+    return {
+
+        "diagnostic":
+            "V1.3_PRE2016_ENTRY_FEATURE_DIAGNOSTIC",
+
+        "model":
+            "V1.3_CONFIRM3",
+
+        "purpose":
+            (
+                "Independent descriptive check of the "
+                "previously observed overextension hypothesis "
+                "using the pre-2016 historical holdout."
+            ),
+
+        "methodology": {
+
+            "strategy_modified":
+                False,
+
+            "parameter_optimization":
+                False,
+
+            "new_trading_filter":
+                False,
+
+            "threshold_search":
+                False,
+
+            "entry_features_from":
+                (
+                    "Signal-date close immediately before "
+                    "next-open execution"
+                ),
+
+            "primary_preexisting_hypothesis":
+                (
+                    "Losing trades may show greater MOM60 "
+                    "and ATR% than winning trades."
+                ),
+
+            "important_warning":
+                (
+                    "Do not use this holdout to select "
+                    "MOM60 or ATR thresholds."
+                ),
+        },
+
+        "holdout_period": {
+
+            "start":
+                str(
+                    pd.Timestamp(
+                        holdout_dates[0]
+                    ).date()
+                ),
+
+            "end":
+                str(
+                    pd.Timestamp(
+                        holdout_dates[-1]
+                    ).date()
+                ),
+
+            "common_trading_days":
+                len(
+                    holdout_dates
+                ),
+        },
+
+        "baseline_performance":
+            baseline[
+                "performance"
+            ],
+
+        "group_analysis":
+            group_analysis,
+
+        "mom60_atr_analysis":
+            mom60_atr_analysis,
+
+        "trades_best_to_worst":
+            trades_best_to_worst,
+
+        "trades_worst_to_best":
+            trades_worst_to_best,
+
+        "all_trades":
+            diagnostic_trades,
+
+        "data_errors":
+            errors,
+    }
+
+
+# ============================================================
+# API ENDPOINT
+# ============================================================
+
+@app.get(
+    "/v13-pre2016-diagnostic"
+)
+def v13_pre2016_diagnostic_endpoint():
+
+    try:
+
+        return (
+            run_v13_pre2016_feature_diagnostic()
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+
+            status_code=400,
+
+            detail=str(
+                exc
+            ),
+        )
