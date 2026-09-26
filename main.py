@@ -8396,3 +8396,1342 @@ def v14_oos_endpoint(
         transaction_cost_pct=0.10,
         breadth_min=5,
     )
+
+# ============================================================
+# V1.3 DIAGNOSTIC ANALYSIS
+#
+# PURPOSE:
+# - DO NOT change strategy
+# - DO NOT change entries/exits
+# - DO NOT optimize parameters
+#
+# Analyze entry characteristics of V1.3 CONFIRM3 trades.
+#
+# Main goal:
+# Compare WINNERS vs LOSERS
+# especially inside chronological OOS Fold-2.
+# ============================================================
+
+
+V13_DIAGNOSTIC_NAME = "V1.3-CONFIRM3-ENTRY-DIAGNOSTIC"
+
+
+# ============================================================
+# SAFE NUMERIC HELPERS
+# ============================================================
+
+def diag_float(value, digits=4):
+
+    try:
+
+        value = float(value)
+
+        if np.isnan(value):
+            return None
+
+        if np.isinf(value):
+            return None
+
+        return round(
+            value,
+            digits,
+        )
+
+    except Exception:
+
+        return None
+
+
+def diag_mean(values):
+
+    clean = [
+        float(x)
+        for x in values
+        if x is not None
+        and not pd.isna(x)
+    ]
+
+    if not clean:
+        return None
+
+    return round(
+        float(
+            np.mean(clean)
+        ),
+        4,
+    )
+
+
+def diag_median(values):
+
+    clean = [
+        float(x)
+        for x in values
+        if x is not None
+        and not pd.isna(x)
+    ]
+
+    if not clean:
+        return None
+
+    return round(
+        float(
+            np.median(clean)
+        ),
+        4,
+    )
+
+
+# ============================================================
+# ENTRY FEATURE EXTRACTOR
+#
+# IMPORTANT:
+# trade["entry_date"] is the execution day.
+#
+# Our system:
+# signal at CLOSE
+# execution NEXT OPEN
+#
+# Therefore entry indicators MUST come from the previous
+# common trading day.
+#
+# This prevents accidental look-ahead.
+# ============================================================
+
+def diagnostic_entry_features(
+    prepared,
+    common_dates,
+    trade,
+):
+
+    symbol = trade["symbol"]
+
+    if symbol not in prepared:
+        return None
+
+    df = prepared[symbol]
+
+    entry_date = pd.Timestamp(
+        trade["entry_date"]
+    )
+
+    # --------------------------------------------------------
+    # Find execution date inside common trading calendar
+    # --------------------------------------------------------
+
+    try:
+
+        execution_pos = (
+            common_dates.index(
+                entry_date
+            )
+        )
+
+    except ValueError:
+
+        # Timestamp timezone / normalization fallback
+
+        execution_pos = None
+
+        for i, dt in enumerate(
+            common_dates
+        ):
+
+            if (
+                pd.Timestamp(dt).date()
+                ==
+                entry_date.date()
+            ):
+
+                execution_pos = i
+                break
+
+        if execution_pos is None:
+            return None
+
+    # Need previous trading day for signal
+    if execution_pos <= 0:
+        return None
+
+    signal_date = (
+        common_dates[
+            execution_pos - 1
+        ]
+    )
+
+    if signal_date not in df.index:
+        return None
+
+    row = df.loc[
+        signal_date
+    ]
+
+    # --------------------------------------------------------
+    # RAW VALUES
+    # --------------------------------------------------------
+
+    close = float(
+        row["Close"]
+    )
+
+    ema20 = float(
+        row["EMA20"]
+    )
+
+    ema50 = float(
+        row["EMA50"]
+    )
+
+    ema100 = float(
+        row["EMA100"]
+    )
+
+    ema200 = float(
+        row["EMA200"]
+    )
+
+    # --------------------------------------------------------
+    # EMA SPREADS
+    #
+    # These are diagnostic only.
+    # They are NOT new trading rules.
+    # --------------------------------------------------------
+
+    ema20_vs_ema50_pct = (
+        (
+            ema20
+            /
+            ema50
+        )
+        -
+        1
+    ) * 100
+
+    ema50_vs_ema200_pct = (
+        (
+            ema50
+            /
+            ema200
+        )
+        -
+        1
+    ) * 100
+
+    ema20_vs_ema200_pct = (
+        (
+            ema20
+            /
+            ema200
+        )
+        -
+        1
+    ) * 100
+
+    # EMA100 distance is not stored directly in base code,
+    # so calculate it here.
+
+    dist_ema100_pct = (
+        (
+            close
+            /
+            ema100
+        )
+        -
+        1
+    ) * 100
+
+    trade_return = diag_float(
+        trade.get(
+            "return_pct"
+        ),
+        4,
+    )
+
+    if (
+        trade_return is not None
+        and
+        trade_return > 0
+    ):
+
+        outcome = "WINNER"
+
+    else:
+
+        outcome = "LOSER"
+
+    return {
+
+        "symbol":
+            symbol,
+
+        "signal_date":
+            str(
+                pd.Timestamp(
+                    signal_date
+                ).date()
+            ),
+
+        "entry_date":
+            str(
+                entry_date.date()
+            ),
+
+        "exit_date":
+            trade.get(
+                "exit_date"
+            ),
+
+        "outcome":
+            outcome,
+
+        "return_pct":
+            trade_return,
+
+        "holding_days":
+            trade.get(
+                "holding_days"
+            ),
+
+        # ----------------------------------------------------
+        # SCORE
+        # ----------------------------------------------------
+
+        "score":
+            diag_float(
+                row["SCORE"],
+                2,
+            ),
+
+        # ----------------------------------------------------
+        # MOMENTUM
+        # ----------------------------------------------------
+
+        "mom20":
+            diag_float(
+                row["MOM20"],
+                4,
+            ),
+
+        "mom60":
+            diag_float(
+                row["MOM60"],
+                4,
+            ),
+
+        "mom120":
+            diag_float(
+                row["MOM120"],
+                4,
+            ),
+
+        # ----------------------------------------------------
+        # RSI
+        # ----------------------------------------------------
+
+        "rsi14":
+            diag_float(
+                row["RSI14"],
+                4,
+            ),
+
+        # ----------------------------------------------------
+        # MACD
+        # ----------------------------------------------------
+
+        "macd":
+            diag_float(
+                row["MACD"],
+                6,
+            ),
+
+        "macd_signal":
+            diag_float(
+                row["MACD_SIGNAL"],
+                6,
+            ),
+
+        "macd_hist":
+            diag_float(
+                row["MACD_HIST"],
+                6,
+            ),
+
+        # ----------------------------------------------------
+        # VOLATILITY
+        # ----------------------------------------------------
+
+        "atr14":
+            diag_float(
+                row["ATR14"],
+                6,
+            ),
+
+        "atr_pct":
+            diag_float(
+                row["ATR_PCT"],
+                4,
+            ),
+
+        # ----------------------------------------------------
+        # VOLUME
+        # ----------------------------------------------------
+
+        "volume_ratio":
+            diag_float(
+                row["VOLUME_RATIO"],
+                4,
+            ),
+
+        # ----------------------------------------------------
+        # PRICE / EMA DISTANCES
+        # ----------------------------------------------------
+
+        "dist_ema20_pct":
+            diag_float(
+                row["DIST_EMA20"],
+                4,
+            ),
+
+        "dist_ema50_pct":
+            diag_float(
+                row["DIST_EMA50"],
+                4,
+            ),
+
+        "dist_ema100_pct":
+            diag_float(
+                dist_ema100_pct,
+                4,
+            ),
+
+        "dist_ema200_pct":
+            diag_float(
+                row["DIST_EMA200"],
+                4,
+            ),
+
+        # ----------------------------------------------------
+        # EMA STRUCTURE
+        # ----------------------------------------------------
+
+        "ema20_vs_ema50_pct":
+            diag_float(
+                ema20_vs_ema50_pct,
+                4,
+            ),
+
+        "ema50_vs_ema200_pct":
+            diag_float(
+                ema50_vs_ema200_pct,
+                4,
+            ),
+
+        "ema20_vs_ema200_pct":
+            diag_float(
+                ema20_vs_ema200_pct,
+                4,
+            ),
+
+        # ----------------------------------------------------
+        # 1Y DRAWDOWN
+        # ----------------------------------------------------
+
+        "drawdown_252_pct":
+            diag_float(
+                row["DRAWDOWN_252"],
+                4,
+            ),
+
+        # ----------------------------------------------------
+        # EXISTING DIAGNOSTIC
+        # ----------------------------------------------------
+
+        "entry_breadth":
+            trade.get(
+                "entry_breadth"
+            ),
+    }
+
+
+# ============================================================
+# GROUP SUMMARY
+# ============================================================
+
+DIAGNOSTIC_FIELDS = [
+
+    "score",
+
+    "mom20",
+    "mom60",
+    "mom120",
+
+    "rsi14",
+
+    "macd_hist",
+
+    "atr_pct",
+
+    "volume_ratio",
+
+    "dist_ema20_pct",
+    "dist_ema50_pct",
+    "dist_ema100_pct",
+    "dist_ema200_pct",
+
+    "ema20_vs_ema50_pct",
+    "ema50_vs_ema200_pct",
+    "ema20_vs_ema200_pct",
+
+    "drawdown_252_pct",
+
+    "entry_breadth",
+
+    "holding_days",
+
+    "return_pct",
+]
+
+
+def diagnostic_group_summary(
+    trades,
+):
+
+    summary = {
+        "count":
+            len(trades),
+    }
+
+    if not trades:
+        return summary
+
+    for field in DIAGNOSTIC_FIELDS:
+
+        values = [
+            x.get(field)
+            for x in trades
+        ]
+
+        summary[field] = {
+
+            "mean":
+                diag_mean(
+                    values
+                ),
+
+            "median":
+                diag_median(
+                    values
+                ),
+        }
+
+    return summary
+
+
+# ============================================================
+# WINNER VS LOSER DIFFERENCE
+#
+# Positive value:
+# winner mean > loser mean
+#
+# Negative value:
+# winner mean < loser mean
+#
+# IMPORTANT:
+# This is descriptive only.
+# It does NOT create a threshold.
+# ============================================================
+
+def diagnostic_winner_loser_difference(
+    winners,
+    losers,
+):
+
+    result = {}
+
+    for field in DIAGNOSTIC_FIELDS:
+
+        winner_values = [
+            x.get(field)
+            for x in winners
+        ]
+
+        loser_values = [
+            x.get(field)
+            for x in losers
+        ]
+
+        winner_mean = (
+            diag_mean(
+                winner_values
+            )
+        )
+
+        loser_mean = (
+            diag_mean(
+                loser_values
+            )
+        )
+
+        if (
+            winner_mean is not None
+            and
+            loser_mean is not None
+        ):
+
+            difference = round(
+                winner_mean
+                -
+                loser_mean,
+                4,
+            )
+
+        else:
+
+            difference = None
+
+        result[field] = {
+
+            "winner_mean":
+                winner_mean,
+
+            "loser_mean":
+                loser_mean,
+
+            "winner_minus_loser":
+                difference,
+        }
+
+    return result
+
+
+# ============================================================
+# SYMBOL SUMMARY
+#
+# Diagnostic only.
+# We are NOT using this to exclude assets.
+# ============================================================
+
+def diagnostic_symbol_summary(
+    trades,
+):
+
+    symbols = {}
+
+    for trade in trades:
+
+        symbol = trade["symbol"]
+
+        if symbol not in symbols:
+
+            symbols[symbol] = {
+                "trade_count": 0,
+                "winner_count": 0,
+                "loser_count": 0,
+                "returns": [],
+            }
+
+        item = symbols[
+            symbol
+        ]
+
+        item[
+            "trade_count"
+        ] += 1
+
+        return_pct = (
+            trade.get(
+                "return_pct"
+            )
+        )
+
+        if return_pct is not None:
+
+            item[
+                "returns"
+            ].append(
+                return_pct
+            )
+
+            if return_pct > 0:
+
+                item[
+                    "winner_count"
+                ] += 1
+
+            else:
+
+                item[
+                    "loser_count"
+                ] += 1
+
+    output = {}
+
+    for symbol, item in symbols.items():
+
+        returns = (
+            item.pop(
+                "returns"
+            )
+        )
+
+        output[
+            symbol
+        ] = {
+
+            **item,
+
+            "win_rate_pct":
+                round(
+                    (
+                        item[
+                            "winner_count"
+                        ]
+                        /
+                        item[
+                            "trade_count"
+                        ]
+                        *
+                        100
+                    ),
+                    2,
+                )
+                if item[
+                    "trade_count"
+                ]
+                else 0,
+
+            "average_return_pct":
+                diag_mean(
+                    returns
+                ),
+
+            "median_return_pct":
+                diag_median(
+                    returns
+                ),
+
+            "total_trade_return_pct":
+                diag_float(
+                    sum(
+                        returns
+                    ),
+                    4,
+                )
+                if returns
+                else 0,
+        }
+
+    return output
+
+
+# ============================================================
+# ANALYZE ONE FOLD
+# ============================================================
+
+def analyze_v13_diagnostic_fold(
+    prepared,
+    full_common_dates,
+    fold_dates,
+    fold_number,
+    actual_oos_dates,
+    entry_score=75,
+    exit_score=50,
+    transaction_cost_pct=0.10,
+):
+
+    # --------------------------------------------------------
+    # IMPORTANT
+    #
+    # Use V1.3 baseline logic already used in V1.4 comparison.
+    #
+    # mode="V13" means:
+    # CONFIRM3
+    # no breadth gate
+    # --------------------------------------------------------
+
+    result = (
+        run_v14_rotation_variant(
+            prepared=prepared,
+            common_dates=fold_dates,
+            top_n=2,
+            entry_score=entry_score,
+            exit_score=exit_score,
+            transaction_cost_pct=transaction_cost_pct,
+            mode="V13",
+            breadth_min=5,
+        )
+    )
+
+    enriched = []
+
+    for trade in result["trades"]:
+
+        features = (
+            diagnostic_entry_features(
+                prepared=prepared,
+                common_dates=full_common_dates,
+                trade=trade,
+            )
+        )
+
+        if features is not None:
+
+            enriched.append(
+                features
+            )
+
+    winners = [
+        x
+        for x in enriched
+        if x[
+            "outcome"
+        ] == "WINNER"
+    ]
+
+    losers = [
+        x
+        for x in enriched
+        if x[
+            "outcome"
+        ] == "LOSER"
+    ]
+
+    return {
+
+        "fold":
+            fold_number,
+
+        "oos_period": {
+
+            "start":
+                str(
+                    actual_oos_dates[
+                        0
+                    ].date()
+                ),
+
+            "end":
+                str(
+                    actual_oos_dates[
+                        -1
+                    ].date()
+                ),
+
+            "trading_days":
+                len(
+                    actual_oos_dates
+                ),
+        },
+
+        "performance":
+            result[
+                "performance"
+            ],
+
+        "diagnostic_trade_count":
+            len(
+                enriched
+            ),
+
+        "winner_count":
+            len(
+                winners
+            ),
+
+        "loser_count":
+            len(
+                losers
+            ),
+
+        "winner_summary":
+            diagnostic_group_summary(
+                winners
+            ),
+
+        "loser_summary":
+            diagnostic_group_summary(
+                losers
+            ),
+
+        "winner_vs_loser":
+            diagnostic_winner_loser_difference(
+                winners,
+                losers,
+            ),
+
+        "symbol_summary":
+            diagnostic_symbol_summary(
+                enriched
+            ),
+
+        "trades":
+            enriched,
+    }
+
+
+# ============================================================
+# ALL 4 OOS FOLDS
+#
+# Same chronological structure:
+#
+# years = 10
+# initial train = 50%
+# folds = 4
+#
+# No fitting.
+# No optimization.
+# Each OOS fold starts CASH.
+# ============================================================
+
+def run_v13_entry_diagnostic(
+    years=10,
+    folds=4,
+    initial_train_pct=50,
+    entry_score=75,
+    exit_score=50,
+    transaction_cost_pct=0.10,
+):
+
+    (
+        prepared,
+        common_dates,
+        errors,
+    ) = prepare_rotation_data(
+        years
+    )
+
+    n = len(
+        common_dates
+    )
+
+    if n < 500:
+
+        raise ValueError(
+            "Diagnostic OOS için yeterli veri yok."
+        )
+
+    folds = int(
+        folds
+    )
+
+    if folds < 2:
+
+        raise ValueError(
+            "folds en az 2 olmalı."
+        )
+
+    initial_train_pct = int(
+        initial_train_pct
+    )
+
+    if not (
+        30
+        <=
+        initial_train_pct
+        <=
+        80
+    ):
+
+        raise ValueError(
+            "initial_train_pct 30-80 arasında olmalı."
+        )
+
+    train_end = int(
+        n
+        *
+        initial_train_pct
+        /
+        100
+    )
+
+    train_end = max(
+        250,
+        train_end,
+    )
+
+    minimum_oos_days = (
+        folds
+        *
+        40
+    )
+
+    if (
+        n
+        -
+        train_end
+        <
+        minimum_oos_days
+    ):
+
+        train_end = (
+            n
+            -
+            minimum_oos_days
+        )
+
+    if train_end < 250:
+
+        raise ValueError(
+            "Train/OOS bölünmesi için yeterli veri yok."
+        )
+
+    remaining = (
+        n
+        -
+        train_end
+    )
+
+    base_fold_size = (
+        remaining
+        //
+        folds
+    )
+
+    remainder = (
+        remaining
+        %
+        folds
+    )
+
+    fold_sizes = []
+
+    for fold_idx in range(
+        folds
+    ):
+
+        size = (
+            base_fold_size
+        )
+
+        if fold_idx < remainder:
+
+            size += 1
+
+        fold_sizes.append(
+            size
+        )
+
+    fold_results = []
+
+    cursor = (
+        train_end
+    )
+
+    for fold_number in range(
+        1,
+        folds + 1
+    ):
+
+        fold_size = (
+            fold_sizes[
+                fold_number - 1
+            ]
+        )
+
+        oos_start_idx = (
+            cursor
+        )
+
+        oos_end_idx = min(
+            n,
+            cursor
+            +
+            fold_size,
+        )
+
+        if (
+            oos_end_idx
+            <=
+            oos_start_idx
+        ):
+
+            break
+
+        # ----------------------------------------------------
+        # One previous trading day included so the signal
+        # can execute at first OOS open.
+        # ----------------------------------------------------
+
+        slice_start_idx = max(
+            0,
+            oos_start_idx - 1,
+        )
+
+        fold_dates = (
+            common_dates[
+                slice_start_idx:
+                oos_end_idx
+            ]
+        )
+
+        actual_oos_dates = (
+            common_dates[
+                oos_start_idx:
+                oos_end_idx
+            ]
+        )
+
+        if len(
+            actual_oos_dates
+        ) == 0:
+
+            cursor = (
+                oos_end_idx
+            )
+
+            continue
+
+        fold_result = (
+            analyze_v13_diagnostic_fold(
+                prepared=prepared,
+                full_common_dates=common_dates,
+                fold_dates=fold_dates,
+                fold_number=fold_number,
+                actual_oos_dates=actual_oos_dates,
+                entry_score=entry_score,
+                exit_score=exit_score,
+                transaction_cost_pct=transaction_cost_pct,
+            )
+        )
+
+        fold_results.append(
+            fold_result
+        )
+
+        cursor = (
+            oos_end_idx
+        )
+
+    # ========================================================
+    # CROSS-FOLD SUMMARY
+    #
+    # Helps determine whether a feature seen in bad Fold-2
+    # also exists in successful folds.
+    # ========================================================
+
+    cross_fold = {}
+
+    for field in DIAGNOSTIC_FIELDS:
+
+        cross_fold[
+            field
+        ] = []
+
+        for fold in fold_results:
+
+            comparison = (
+                fold[
+                    "winner_vs_loser"
+                ].get(
+                    field,
+                    {}
+                )
+            )
+
+            cross_fold[
+                field
+            ].append({
+
+                "fold":
+                    fold[
+                        "fold"
+                    ],
+
+                "winner_mean":
+                    comparison.get(
+                        "winner_mean"
+                    ),
+
+                "loser_mean":
+                    comparison.get(
+                        "loser_mean"
+                    ),
+
+                "winner_minus_loser":
+                    comparison.get(
+                        "winner_minus_loser"
+                    ),
+            })
+
+    return {
+
+        "diagnostic":
+            V13_DIAGNOSTIC_NAME,
+
+        "generated_at_utc":
+            utc_now(),
+
+        "purpose":
+            (
+                "Describe entry characteristics of "
+                "V1.3 CONFIRM3 winners and losers. "
+                "No strategy rules are changed."
+            ),
+
+        "methodology": {
+
+            "model":
+                "V1.3_CONFIRM3",
+
+            "portfolio":
+                "TOP_2_EQUAL_WEIGHT",
+
+            "years":
+                years,
+
+            "folds":
+                folds,
+
+            "initial_train_pct":
+                initial_train_pct,
+
+            "entry_score":
+                entry_score,
+
+            "exit_score":
+                exit_score,
+
+            "transaction_cost_pct_each_side":
+                transaction_cost_pct,
+
+            "entry_features_from":
+                (
+                    "Signal close immediately before "
+                    "next-open execution"
+                ),
+
+            "parameter_optimization":
+                False,
+
+            "new_trading_filter":
+                False,
+
+            "strategy_modified":
+                False,
+        },
+
+        "full_period": {
+
+            "start":
+                str(
+                    common_dates[
+                        0
+                    ].date()
+                ),
+
+            "end":
+                str(
+                    common_dates[
+                        -1
+                    ].date()
+                ),
+
+            "common_trading_days":
+                n,
+        },
+
+        "folds":
+            fold_results,
+
+        "cross_fold_feature_comparison":
+            cross_fold,
+
+        "data_errors":
+            errors,
+
+        "interpretation_warning":
+            (
+                "This endpoint is descriptive research only. "
+                "Do not convert a Fold-2 difference directly "
+                "into a new threshold without checking whether "
+                "the same relationship is stable across the "
+                "other folds."
+            ),
+    }
+
+
+# ============================================================
+# FOLD-2 ONLY
+#
+# Smaller output.
+# Start with this endpoint.
+# ============================================================
+
+@app.get(
+    "/v13-diagnostic-fold2"
+)
+def v13_diagnostic_fold2_endpoint():
+
+    result = (
+        run_v13_entry_diagnostic(
+            years=10,
+            folds=4,
+            initial_train_pct=50,
+            entry_score=75,
+            exit_score=50,
+            transaction_cost_pct=0.10,
+        )
+    )
+
+    fold2 = None
+
+    for fold in result[
+        "folds"
+    ]:
+
+        if fold[
+            "fold"
+        ] == 2:
+
+            fold2 = fold
+            break
+
+    if fold2 is None:
+
+        raise ValueError(
+            "Fold-2 bulunamadı."
+        )
+
+    return {
+
+        "diagnostic":
+            result[
+                "diagnostic"
+            ],
+
+        "methodology":
+            result[
+                "methodology"
+            ],
+
+        "fold2":
+            fold2,
+
+        "interpretation_warning":
+            result[
+                "interpretation_warning"
+            ],
+    }
+
+
+# ============================================================
+# ALL FOLDS
+#
+# Run AFTER Fold-2 result is checked.
+# ============================================================
+
+@app.get(
+    "/v13-diagnostic-all-folds"
+)
+def v13_diagnostic_all_folds_endpoint():
+
+    return (
+        run_v13_entry_diagnostic(
+            years=10,
+            folds=4,
+            initial_train_pct=50,
+            entry_score=75,
+            exit_score=50,
+            transaction_cost_pct=0.10,
+        )
+    )
