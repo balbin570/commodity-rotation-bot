@@ -20333,3 +20333,1321 @@ def v13_ema_time_stability_endpoint():
                 exc
             ),
         )
+
+# ============================================================
+# SIMPLE COMMODITY MOMENTUM
+# Literature-style simple trend + momentum model
+#
+# ENTRY:
+#   Close > EMA200
+#   EMA50 > EMA200
+#   6-month momentum > 0
+#   12-month momentum > 0
+#
+# RANKING:
+#   Average of 6M and 12M momentum
+#
+# PORTFOLIO:
+#   Top 2 eligible assets
+#   Equal weight
+#   Sticky: existing holding is NOT replaced merely because
+#   another asset becomes stronger.
+#
+# EXIT:
+#   Exit when ANY entry condition becomes false.
+#
+# EXECUTION:
+#   Signal at close
+#   Trade at next trading-day open
+#
+# COST:
+#   0.10% each side
+#
+# LONG ONLY
+# NO LEVERAGE
+# NO AUTOMATIC ORDERS
+# ============================================================
+
+
+SIMPLE_MODEL_NAME = "SIMPLE-COMMODITY-MOMENTUM-V1"
+
+
+def simple_prepare_data(years=10):
+
+    prepared, common_dates, errors = prepare_rotation_data(
+        years
+    )
+
+    simple_prepared = {}
+
+    for symbol, original_df in prepared.items():
+
+        df = original_df.copy()
+
+        # Approx. 6 and 12 trading months
+        df["MOM6M"] = (
+            df["Close"].pct_change(126) * 100
+        )
+
+        df["MOM12M"] = (
+            df["Close"].pct_change(252) * 100
+        )
+
+        # Simple ranking strength
+        df["SIMPLE_MOMENTUM_SCORE"] = (
+            (
+                df["MOM6M"]
+                +
+                df["MOM12M"]
+            )
+            /
+            2
+        )
+
+        df["SIMPLE_ELIGIBLE"] = (
+            (df["Close"] > df["EMA200"])
+            &
+            (df["EMA50"] > df["EMA200"])
+            &
+            (df["MOM6M"] > 0)
+            &
+            (df["MOM12M"] > 0)
+        )
+
+        simple_prepared[symbol] = df
+
+    return (
+        simple_prepared,
+        common_dates,
+        errors,
+    )
+
+
+def simple_profit_factor(trades):
+
+    profits = 0.0
+    losses = 0.0
+
+    for trade in trades:
+
+        r = float(
+            trade["return_pct"]
+        )
+
+        if r > 0:
+            profits += r
+
+        elif r < 0:
+            losses += abs(r)
+
+    if losses == 0:
+
+        if profits > 0:
+            return None
+
+        return 0.0
+
+    return round(
+        profits / losses,
+        3,
+    )
+
+
+def run_simple_commodity_momentum(
+    years=10,
+    top_n=2,
+    transaction_cost_pct=0.10,
+):
+
+    (
+        prepared,
+        common_dates,
+        errors,
+    ) = simple_prepare_data(
+        years=years
+    )
+
+    if len(common_dates) < 2:
+
+        raise ValueError(
+            "Backtest için yeterli ortak tarih yok."
+        )
+
+    cost = (
+        float(transaction_cost_pct)
+        /
+        100.0
+    )
+
+    # --------------------------------------------------------
+    # PORTFOLIO
+    #
+    # Each slot represents 1/top_n of initial portfolio.
+    # Empty slots remain CASH.
+    # --------------------------------------------------------
+
+    slot_value = (
+        1.0
+        /
+        float(top_n)
+    )
+
+    cash = 1.0
+
+    holdings = {}
+
+    trades = []
+
+    equity_curve = []
+
+    rotation_count = 0
+
+    entry_count = 0
+
+    exit_count = 0
+
+    # --------------------------------------------------------
+    # Pending orders:
+    #
+    # Decisions are created at today's CLOSE
+    # and executed at NEXT day's OPEN.
+    # --------------------------------------------------------
+
+    pending_exits = []
+
+    pending_entries = []
+
+    previous_close_prices = {}
+
+    for i, date in enumerate(
+        common_dates
+    ):
+
+        # ====================================================
+        # 1) EXECUTE YESTERDAY'S SIGNALS AT TODAY OPEN
+        # ====================================================
+
+        # -----------------------------
+        # EXITS
+        # -----------------------------
+
+        for symbol in list(
+            pending_exits
+        ):
+
+            if symbol not in holdings:
+                continue
+
+            df = prepared[symbol]
+
+            if date not in df.index:
+                continue
+
+            open_price = float(
+                df.loc[
+                    date,
+                    "Open",
+                ]
+            )
+
+            position = holdings.pop(
+                symbol
+            )
+
+            shares = float(
+                position["shares"]
+            )
+
+            gross_value = (
+                shares
+                *
+                open_price
+            )
+
+            net_value = (
+                gross_value
+                *
+                (1.0 - cost)
+            )
+
+            cash += net_value
+
+            entry_value = float(
+                position["entry_value"]
+            )
+
+            trade_return_pct = (
+                (
+                    net_value
+                    /
+                    entry_value
+                    -
+                    1.0
+                )
+                *
+                100.0
+            )
+
+            holding_days = (
+                pd.Timestamp(date)
+                -
+                pd.Timestamp(
+                    position["entry_date"]
+                )
+            ).days
+
+            trades.append(
+                {
+                    "symbol":
+                        symbol,
+
+                    "entry_date":
+                        str(
+                            pd.Timestamp(
+                                position["entry_date"]
+                            ).date()
+                        ),
+
+                    "exit_date":
+                        str(
+                            pd.Timestamp(
+                                date
+                            ).date()
+                        ),
+
+                    "entry_price":
+                        round(
+                            float(
+                                position["entry_price"]
+                            ),
+                            4,
+                        ),
+
+                    "exit_price":
+                        round(
+                            open_price,
+                            4,
+                        ),
+
+                    "return_pct":
+                        round(
+                            trade_return_pct,
+                            2,
+                        ),
+
+                    "holding_days":
+                        int(
+                            holding_days
+                        ),
+
+                    "exit_reason":
+                        "TREND_OR_MOMENTUM_BROKEN",
+                }
+            )
+
+            exit_count += 1
+
+        # -----------------------------
+        # ENTRIES
+        # -----------------------------
+
+        free_slots = (
+            top_n
+            -
+            len(
+                holdings
+            )
+        )
+
+        if free_slots > 0:
+
+            for symbol in pending_entries:
+
+                if free_slots <= 0:
+                    break
+
+                if symbol in holdings:
+                    continue
+
+                df = prepared[symbol]
+
+                if date not in df.index:
+                    continue
+
+                open_price = float(
+                    df.loc[
+                        date,
+                        "Open",
+                    ]
+                )
+
+                # One fixed portfolio slot
+                allocation = min(
+                    slot_value,
+                    cash,
+                )
+
+                if allocation <= 0:
+                    continue
+
+                # Entry transaction cost
+                investable = (
+                    allocation
+                    *
+                    (1.0 - cost)
+                )
+
+                shares = (
+                    investable
+                    /
+                    open_price
+                )
+
+                holdings[symbol] = {
+                    "shares":
+                        shares,
+
+                    "entry_date":
+                        date,
+
+                    "entry_price":
+                        open_price,
+
+                    # allocation BEFORE entry cost
+                    # so return includes entry + exit cost
+                    "entry_value":
+                        allocation,
+                }
+
+                cash -= allocation
+
+                free_slots -= 1
+                entry_count += 1
+
+        pending_exits = []
+        pending_entries = []
+
+        # ====================================================
+        # 2) MARK PORTFOLIO AT TODAY CLOSE
+        # ====================================================
+
+        holdings_value = 0.0
+
+        for symbol, position in holdings.items():
+
+            df = prepared[symbol]
+
+            if date not in df.index:
+                continue
+
+            close_price = float(
+                df.loc[
+                    date,
+                    "Close",
+                ]
+            )
+
+            holdings_value += (
+                float(
+                    position["shares"]
+                )
+                *
+                close_price
+            )
+
+        equity = (
+            cash
+            +
+            holdings_value
+        )
+
+        equity_curve.append(
+            {
+                "date":
+                    str(
+                        pd.Timestamp(
+                            date
+                        ).date()
+                    ),
+
+                "equity":
+                    float(
+                        equity
+                    ),
+
+                "cash":
+                    float(
+                        cash
+                    ),
+
+                "holdings":
+                    list(
+                        holdings.keys()
+                    ),
+            }
+        )
+
+        # Last day: no new next-open signals
+        if i >= (
+            len(common_dates)
+            -
+            1
+        ):
+            break
+
+        # ====================================================
+        # 3) TODAY CLOSE -> EXIT SIGNALS
+        # ====================================================
+
+        for symbol in list(
+            holdings.keys()
+        ):
+
+            df = prepared[symbol]
+
+            if date not in df.index:
+                continue
+
+            row = df.loc[
+                date
+            ]
+
+            eligible = bool(
+                row[
+                    "SIMPLE_ELIGIBLE"
+                ]
+            )
+
+            if not eligible:
+
+                pending_exits.append(
+                    symbol
+                )
+
+        # ====================================================
+        # 4) TODAY CLOSE -> NEW ENTRY CANDIDATES
+        #
+        # Sticky logic:
+        # existing holdings are NOT displaced by ranking.
+        # Ranking only fills empty / exiting slots.
+        # ====================================================
+
+        surviving_holdings = [
+
+            symbol
+
+            for symbol in holdings
+
+            if symbol not in pending_exits
+        ]
+
+        available_slots_next_open = (
+            top_n
+            -
+            len(
+                surviving_holdings
+            )
+        )
+
+        if available_slots_next_open > 0:
+
+            candidates = []
+
+            for symbol, df in prepared.items():
+
+                if symbol in surviving_holdings:
+                    continue
+
+                if symbol in holdings:
+                    # scheduled to exit tomorrow;
+                    # don't re-enter same symbol immediately
+                    continue
+
+                if date not in df.index:
+                    continue
+
+                row = df.loc[
+                    date
+                ]
+
+                if not bool(
+                    row[
+                        "SIMPLE_ELIGIBLE"
+                    ]
+                ):
+                    continue
+
+                mom6 = row[
+                    "MOM6M"
+                ]
+
+                mom12 = row[
+                    "MOM12M"
+                ]
+
+                rank_score = row[
+                    "SIMPLE_MOMENTUM_SCORE"
+                ]
+
+                if (
+                    pd.isna(mom6)
+                    or
+                    pd.isna(mom12)
+                    or
+                    pd.isna(rank_score)
+                ):
+                    continue
+
+                candidates.append(
+                    {
+                        "symbol":
+                            symbol,
+
+                        "rank_score":
+                            float(
+                                rank_score
+                            ),
+
+                        "mom6":
+                            float(
+                                mom6
+                            ),
+
+                        "mom12":
+                            float(
+                                mom12
+                            ),
+                    }
+                )
+
+            candidates.sort(
+                key=lambda x: (
+                    x["rank_score"],
+                    x["mom12"],
+                    x["mom6"],
+                ),
+                reverse=True,
+            )
+
+            pending_entries = [
+
+                item["symbol"]
+
+                for item in candidates[
+                    :available_slots_next_open
+                ]
+            ]
+
+            if pending_entries:
+                rotation_count += 1
+
+    # ========================================================
+    # FORCE CLOSE REMAINING POSITIONS AT FINAL CLOSE
+    # ========================================================
+
+    final_date = common_dates[-1]
+
+    for symbol in list(
+        holdings.keys()
+    ):
+
+        position = holdings.pop(
+            symbol
+        )
+
+        df = prepared[symbol]
+
+        final_close = float(
+            df.loc[
+                final_date,
+                "Close",
+            ]
+        )
+
+        shares = float(
+            position["shares"]
+        )
+
+        gross_value = (
+            shares
+            *
+            final_close
+        )
+
+        net_value = (
+            gross_value
+            *
+            (1.0 - cost)
+        )
+
+        cash += net_value
+
+        entry_value = float(
+            position["entry_value"]
+        )
+
+        trade_return_pct = (
+            (
+                net_value
+                /
+                entry_value
+                -
+                1.0
+            )
+            *
+            100.0
+        )
+
+        holding_days = (
+            pd.Timestamp(
+                final_date
+            )
+            -
+            pd.Timestamp(
+                position["entry_date"]
+            )
+        ).days
+
+        trades.append(
+            {
+                "symbol":
+                    symbol,
+
+                "entry_date":
+                    str(
+                        pd.Timestamp(
+                            position["entry_date"]
+                        ).date()
+                    ),
+
+                "exit_date":
+                    str(
+                        pd.Timestamp(
+                            final_date
+                        ).date()
+                    ),
+
+                "entry_price":
+                    round(
+                        float(
+                            position["entry_price"]
+                        ),
+                        4,
+                    ),
+
+                "exit_price":
+                    round(
+                        final_close,
+                        4,
+                    ),
+
+                "return_pct":
+                    round(
+                        trade_return_pct,
+                        2,
+                    ),
+
+                "holding_days":
+                    int(
+                        holding_days
+                    ),
+
+                "exit_reason":
+                    "FORCED_FINAL_CLOSE",
+            }
+        )
+
+    final_equity = float(
+        cash
+    )
+
+    # ========================================================
+    # PERFORMANCE
+    # ========================================================
+
+    total_return_pct = (
+        (
+            final_equity
+            -
+            1.0
+        )
+        *
+        100.0
+    )
+
+    start_date = pd.Timestamp(
+        common_dates[0]
+    )
+
+    end_date = pd.Timestamp(
+        common_dates[-1]
+    )
+
+    actual_years = max(
+        (
+            end_date
+            -
+            start_date
+        ).days
+        /
+        365.25,
+        0.01,
+    )
+
+    cagr_pct = (
+        (
+            final_equity
+            **
+            (
+                1.0
+                /
+                actual_years
+            )
+            -
+            1.0
+        )
+        *
+        100.0
+    )
+
+    # -----------------------------
+    # MAX DRAWDOWN
+    # -----------------------------
+
+    equity_values = [
+        float(
+            item["equity"]
+        )
+        for item in equity_curve
+    ]
+
+    # Replace last mark with final liquidation value
+    if equity_values:
+        equity_values[-1] = (
+            final_equity
+        )
+
+    peak = None
+    max_drawdown_pct = 0.0
+
+    for value in equity_values:
+
+        if (
+            peak is None
+            or
+            value > peak
+        ):
+            peak = value
+
+        if peak and peak > 0:
+
+            drawdown = (
+                (
+                    value
+                    /
+                    peak
+                    -
+                    1.0
+                )
+                *
+                100.0
+            )
+
+            if drawdown < max_drawdown_pct:
+                max_drawdown_pct = drawdown
+
+    # -----------------------------
+    # TRADE STATS
+    # -----------------------------
+
+    winners = [
+        trade
+        for trade in trades
+        if float(
+            trade["return_pct"]
+        ) > 0
+    ]
+
+    losers = [
+        trade
+        for trade in trades
+        if float(
+            trade["return_pct"]
+        ) <= 0
+    ]
+
+    trade_count = len(
+        trades
+    )
+
+    win_rate_pct = (
+        (
+            len(winners)
+            /
+            trade_count
+        )
+        *
+        100.0
+        if trade_count
+        else 0.0
+    )
+
+    avg_trade_return_pct = (
+        float(
+            np.mean(
+                [
+                    float(
+                        trade[
+                            "return_pct"
+                        ]
+                    )
+                    for trade in trades
+                ]
+            )
+        )
+        if trades
+        else 0.0
+    )
+
+    median_trade_return_pct = (
+        float(
+            np.median(
+                [
+                    float(
+                        trade[
+                            "return_pct"
+                        ]
+                    )
+                    for trade in trades
+                ]
+            )
+        )
+        if trades
+        else 0.0
+    )
+
+    avg_holding_days = (
+        float(
+            np.mean(
+                [
+                    float(
+                        trade[
+                            "holding_days"
+                        ]
+                    )
+                    for trade in trades
+                ]
+            )
+        )
+        if trades
+        else 0.0
+    )
+
+    pf = simple_profit_factor(
+        trades
+    )
+
+    # ========================================================
+    # DBC BUY & HOLD SAME WINDOW
+    # ========================================================
+
+    dbc_return_pct = None
+
+    if "DBC" in prepared:
+
+        dbc = prepared[
+            "DBC"
+        ]
+
+        first_date = common_dates[
+            0
+        ]
+
+        last_date = common_dates[
+            -1
+        ]
+
+        first_open = float(
+            dbc.loc[
+                first_date,
+                "Open",
+            ]
+        )
+
+        last_close = float(
+            dbc.loc[
+                last_date,
+                "Close",
+            ]
+        )
+
+        if first_open > 0:
+
+            dbc_return_pct = (
+                (
+                    last_close
+                    /
+                    first_open
+                    -
+                    1.0
+                )
+                *
+                100.0
+            )
+
+    # ========================================================
+    # CURRENT SIGNAL / RANKING
+    # ========================================================
+
+    latest_date = common_dates[
+        -1
+    ]
+
+    current_scan = []
+
+    for symbol, df in prepared.items():
+
+        if latest_date not in df.index:
+            continue
+
+        row = df.loc[
+            latest_date
+        ]
+
+        current_scan.append(
+            {
+                "symbol":
+                    symbol,
+
+                "name":
+                    ASSETS[
+                        symbol
+                    ][
+                        "name"
+                    ],
+
+                "tr_name":
+                    ASSETS[
+                        symbol
+                    ][
+                        "tr_name"
+                    ],
+
+                "close":
+                    safe_float(
+                        row[
+                            "Close"
+                        ],
+                        4,
+                    ),
+
+                "ema50":
+                    safe_float(
+                        row[
+                            "EMA50"
+                        ],
+                        4,
+                    ),
+
+                "ema200":
+                    safe_float(
+                        row[
+                            "EMA200"
+                        ],
+                        4,
+                    ),
+
+                "mom6m_pct":
+                    safe_float(
+                        row[
+                            "MOM6M"
+                        ],
+                        2,
+                    ),
+
+                "mom12m_pct":
+                    safe_float(
+                        row[
+                            "MOM12M"
+                        ],
+                        2,
+                    ),
+
+                "momentum_rank_score":
+                    safe_float(
+                        row[
+                            "SIMPLE_MOMENTUM_SCORE"
+                        ],
+                        2,
+                    ),
+
+                "eligible":
+                    bool(
+                        row[
+                            "SIMPLE_ELIGIBLE"
+                        ]
+                    ),
+            }
+        )
+
+    current_scan.sort(
+        key=lambda x: (
+            x[
+                "eligible"
+            ],
+            (
+                x[
+                    "momentum_rank_score"
+                ]
+                if x[
+                    "momentum_rank_score"
+                ]
+                is not None
+                else -999999
+            ),
+        ),
+        reverse=True,
+    )
+
+    eligible_now = [
+        item
+        for item in current_scan
+        if item[
+            "eligible"
+        ]
+    ]
+
+    top_candidates_now = (
+        eligible_now[
+            :top_n
+        ]
+    )
+
+    return {
+        "model":
+            SIMPLE_MODEL_NAME,
+
+        "generated_at_utc":
+            utc_now(),
+
+        "purpose":
+            (
+                "Simple literature-style commodity "
+                "trend and momentum model"
+            ),
+
+        "rules": {
+            "universe":
+                list(
+                    ASSETS.keys()
+                ),
+
+            "trend":
+                (
+                    "Close > EMA200 AND "
+                    "EMA50 > EMA200"
+                ),
+
+            "momentum":
+                (
+                    "6M return > 0 AND "
+                    "12M return > 0"
+                ),
+
+            "ranking":
+                (
+                    "Average of 6M and 12M momentum"
+                ),
+
+            "portfolio":
+                f"Top {top_n}, equal-weight slots",
+
+            "rotation":
+                (
+                    "Sticky; stronger candidate does not "
+                    "replace an existing valid holding"
+                ),
+
+            "exit":
+                (
+                    "Exit when any trend or momentum "
+                    "eligibility condition becomes false"
+                ),
+
+            "execution":
+                (
+                    "Signal at close; execute next open"
+                ),
+
+            "transaction_cost_pct_each_side":
+                transaction_cost_pct,
+
+            "long_only":
+                True,
+
+            "leverage":
+                False,
+
+            "automatic_orders":
+                False,
+        },
+
+        "test_period": {
+            "start":
+                str(
+                    start_date.date()
+                ),
+
+            "end":
+                str(
+                    end_date.date()
+                ),
+
+            "years_requested":
+                years,
+
+            "actual_years":
+                round(
+                    actual_years,
+                    2,
+                ),
+
+            "common_trading_days":
+                len(
+                    common_dates
+                ),
+        },
+
+        "performance": {
+            "final_equity":
+                round(
+                    final_equity,
+                    6,
+                ),
+
+            "total_return_pct":
+                round(
+                    total_return_pct,
+                    2,
+                ),
+
+            "cagr_pct":
+                round(
+                    cagr_pct,
+                    2,
+                ),
+
+            "max_drawdown_pct":
+                round(
+                    max_drawdown_pct,
+                    2,
+                ),
+
+            "trade_count":
+                trade_count,
+
+            "winner_count":
+                len(
+                    winners
+                ),
+
+            "loser_count":
+                len(
+                    losers
+                ),
+
+            "win_rate_pct":
+                round(
+                    win_rate_pct,
+                    2,
+                ),
+
+            "profit_factor":
+                pf,
+
+            "average_trade_return_pct":
+                round(
+                    avg_trade_return_pct,
+                    2,
+                ),
+
+            "median_trade_return_pct":
+                round(
+                    median_trade_return_pct,
+                    2,
+                ),
+
+            "average_holding_days":
+                round(
+                    avg_holding_days,
+                    1,
+                ),
+
+            "entry_count":
+                entry_count,
+
+            "exit_count":
+                exit_count,
+
+            "rotation_events":
+                rotation_count,
+        },
+
+        "dbc_buy_hold": {
+            "return_pct":
+                (
+                    round(
+                        dbc_return_pct,
+                        2,
+                    )
+                    if dbc_return_pct
+                    is not None
+                    else None
+                )
+        },
+
+        "current_top_candidates":
+            top_candidates_now,
+
+        "current_scan":
+            current_scan,
+
+        "trades":
+            trades,
+
+        "data_errors":
+            errors,
+    }
+
+
+# ============================================================
+# ENDPOINT
+# ============================================================
+
+@app.get(
+    "/simple-momentum"
+)
+def simple_momentum_endpoint(
+    years: int = Query(
+        default=10,
+        ge=3,
+        le=15,
+    ),
+):
+
+    try:
+
+        return (
+            run_simple_commodity_momentum(
+                years=years,
+                top_n=2,
+                transaction_cost_pct=0.10,
+            )
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
