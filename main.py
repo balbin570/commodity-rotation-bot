@@ -13317,3 +13317,1680 @@ def v13_pre2016_diagnostic_endpoint():
                 exc
             ),
         )
+
+# ============================================================
+# V1.3 CONTINUOUS YEAR-BY-YEAR REGIME ANALYSIS
+# ============================================================
+#
+# PURPOSE
+# -------
+# Analyze the FROZEN V1.3 CONFIRM3 strategy year by year.
+#
+# IMPORTANT
+# ---------
+# - NO strategy modification
+# - NO parameter optimization
+# - NO new filter
+# - NO threshold search
+# - NO asset exclusion
+#
+# The V1.3 strategy is run CONTINUOUSLY across the whole
+# available historical period.
+#
+# Calendar-year statistics are then calculated from the
+# continuous equity curve.
+#
+# This means:
+# - positions are NOT force-closed on December 31
+# - portfolio is NOT reset to cash on January 1
+# - long trends can continue naturally across calendar years
+#
+# OUTPUT
+# ------
+# YEAR
+# V1.3 return
+# DBC buy & hold return
+# V1.3 minus DBC
+# Max drawdown
+# Trade exits
+# Winners
+# Win rate
+# Profit factor
+# Cash %
+#
+# ============================================================
+
+
+def v13_yearly_prepare_full_history():
+
+    prepared = {}
+    errors = []
+
+    # --------------------------------------------------------
+    # We want the longest practical common history.
+    #
+    # Existing diagnostics showed CPER limits the common
+    # universe history to approximately late 2011.
+    #
+    # "max" is used here so indicators have proper warm-up
+    # before the actual common V1.3 analysis period.
+    # --------------------------------------------------------
+
+    for symbol in ASSETS:
+
+        try:
+
+            df = download_history(
+                symbol,
+                "max",
+            )
+
+            df = calculate_indicators(
+                df
+            )
+
+            # ------------------------------------------------
+            # SCORE + ORIGINAL MODEL SIGNAL
+            # ------------------------------------------------
+
+            scores = []
+            signals = []
+
+            for _, row in df.iterrows():
+
+                try:
+
+                    required_values = [
+                        row["EMA20"],
+                        row["EMA50"],
+                        row["EMA100"],
+                        row["EMA200"],
+                        row["MOM20"],
+                        row["MOM60"],
+                        row["MOM120"],
+                        row["RSI14"],
+                        row["MACD"],
+                        row["MACD_SIGNAL"],
+                        row["MACD_HIST"],
+                        row["ATR_PCT"],
+                    ]
+
+                    if any(
+                        pd.isna(x)
+                        for x in required_values
+                    ):
+
+                        scores.append(
+                            np.nan
+                        )
+
+                        signals.append(
+                            "BEKLE"
+                        )
+
+                        continue
+
+                    score, _, _ = (
+                        calculate_score(
+                            row
+                        )
+                    )
+
+                    signal = (
+                        determine_signal(
+                            row,
+                            score,
+                        )
+                    )
+
+                    scores.append(
+                        score
+                    )
+
+                    signals.append(
+                        signal
+                    )
+
+                except Exception:
+
+                    scores.append(
+                        np.nan
+                    )
+
+                    signals.append(
+                        "BEKLE"
+                    )
+
+            df["SCORE"] = (
+                scores
+            )
+
+            df["MODEL_SIGNAL"] = (
+                signals
+            )
+
+            # ------------------------------------------------
+            # Keep only rows where the indicators needed by
+            # the strategy are mature.
+            # ------------------------------------------------
+
+            required_columns = [
+                "Open",
+                "High",
+                "Low",
+                "Close",
+                "EMA20",
+                "EMA50",
+                "EMA100",
+                "EMA200",
+                "MOM20",
+                "MOM60",
+                "MOM120",
+                "RSI14",
+                "MACD",
+                "MACD_SIGNAL",
+                "MACD_HIST",
+                "ATR14",
+                "ATR_PCT",
+                "SCORE",
+            ]
+
+            df = (
+                df
+                .dropna(
+                    subset=
+                        required_columns
+                )
+                .copy()
+            )
+
+            if df.empty:
+
+                raise ValueError(
+                    f"{symbol}: gösterge sonrası veri yok."
+                )
+
+            prepared[
+                symbol
+            ] = df
+
+        except Exception as exc:
+
+            errors.append({
+
+                "symbol":
+                    symbol,
+
+                "error":
+                    str(exc),
+            })
+
+    if not prepared:
+
+        raise ValueError(
+            "Yıllık analiz için veri hazırlanamadı."
+        )
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # Require ALL assets.
+    #
+    # We do not want the historical universe silently changing
+    # because one symbol failed to download.
+    # --------------------------------------------------------
+
+    missing_symbols = [
+
+        symbol
+
+        for symbol in ASSETS
+
+        if symbol not in prepared
+    ]
+
+    if missing_symbols:
+
+        raise ValueError(
+            "Eksik semboller nedeniyle analiz durduruldu: "
+            +
+            ", ".join(
+                missing_symbols
+            )
+        )
+
+    # --------------------------------------------------------
+    # COMMON TRADING DATES
+    # --------------------------------------------------------
+
+    common_dates = None
+
+    for symbol in ASSETS:
+
+        dates = set(
+            prepared[
+                symbol
+            ].index
+        )
+
+        if common_dates is None:
+
+            common_dates = dates
+
+        else:
+
+            common_dates = (
+                common_dates
+                .intersection(
+                    dates
+                )
+            )
+
+    common_dates = sorted(
+        common_dates
+    )
+
+    if len(common_dates) < 500:
+
+        raise ValueError(
+            "Yıllık analiz için yeterli ortak tarih yok."
+        )
+
+    return (
+        prepared,
+        common_dates,
+        errors,
+    )
+
+
+# ============================================================
+# DBC DAILY EQUITY CURVE
+# ============================================================
+
+def v13_yearly_dbc_curve(
+    prepared,
+    common_dates,
+):
+
+    if "DBC" not in prepared:
+
+        raise ValueError(
+            "DBC verisi bulunamadı."
+        )
+
+    dbc = (
+        prepared["DBC"]
+    )
+
+    if len(common_dates) < 2:
+
+        raise ValueError(
+            "DBC benchmark için yeterli tarih yok."
+        )
+
+    first_date = (
+        common_dates[0]
+    )
+
+    first_open = float(
+        dbc.loc[
+            first_date,
+            "Open",
+        ]
+    )
+
+    if first_open <= 0:
+
+        raise ValueError(
+            "DBC başlangıç fiyatı geçersiz."
+        )
+
+    curve = []
+
+    # --------------------------------------------------------
+    # Benchmark:
+    # buy at first common-date OPEN
+    # mark to market at each day's CLOSE
+    # --------------------------------------------------------
+
+    for date in common_dates:
+
+        close_price = float(
+            dbc.loc[
+                date,
+                "Close",
+            ]
+        )
+
+        equity = (
+            close_price
+            /
+            first_open
+        )
+
+        curve.append({
+
+            "date":
+                pd.Timestamp(
+                    date
+                ),
+
+            "equity":
+                float(
+                    equity
+                ),
+        })
+
+    return curve
+
+
+# ============================================================
+# CONVERT STRATEGY EQUITY CURVE
+# ============================================================
+
+def v13_yearly_strategy_curve(
+    result,
+    first_common_date,
+):
+
+    curve = []
+
+    # --------------------------------------------------------
+    # Start point:
+    # equity = 1.0 before the first execution interval.
+    # --------------------------------------------------------
+
+    curve.append({
+
+        "date":
+            pd.Timestamp(
+                first_common_date
+            ),
+
+        "equity":
+            1.0,
+
+        "holdings":
+            ["CASH"],
+    })
+
+    for item in (
+        result[
+            "equity_curve"
+        ]
+    ):
+
+        equity_value = (
+            item.get(
+                "equity"
+            )
+        )
+
+        if equity_value is None:
+
+            continue
+
+        curve.append({
+
+            "date":
+                pd.Timestamp(
+                    item[
+                        "date"
+                    ]
+                ),
+
+            "equity":
+                float(
+                    equity_value
+                ),
+
+            "holdings":
+                item.get(
+                    "holdings",
+                    ["CASH"],
+                ),
+        })
+
+    # --------------------------------------------------------
+    # Deduplicate dates if necessary.
+    # Keep latest value.
+    # --------------------------------------------------------
+
+    by_date = {}
+
+    for item in curve:
+
+        by_date[
+            item["date"]
+        ] = item
+
+    curve = [
+
+        by_date[
+            date
+        ]
+
+        for date in sorted(
+            by_date
+        )
+    ]
+
+    return curve
+
+
+# ============================================================
+# YEARLY RETURN
+# ============================================================
+
+def v13_yearly_return_from_curve(
+    curve,
+    year,
+):
+
+    rows = [
+
+        x
+
+        for x in curve
+
+        if (
+            x["date"].year
+            ==
+            year
+        )
+    ]
+
+    if not rows:
+
+        return None
+
+    first_row = rows[0]
+    last_row = rows[-1]
+
+    # --------------------------------------------------------
+    # For a true calendar-year return we need equity at the
+    # end of the previous trading day/year.
+    #
+    # If prior history exists, use the last equity observation
+    # before the first observation of this year.
+    #
+    # For the very first partial year, use the first available
+    # starting equity.
+    # --------------------------------------------------------
+
+    previous_rows = [
+
+        x
+
+        for x in curve
+
+        if (
+            x["date"]
+            <
+            first_row["date"]
+        )
+    ]
+
+    if previous_rows:
+
+        start_equity = float(
+            previous_rows[-1][
+                "equity"
+            ]
+        )
+
+    else:
+
+        start_equity = float(
+            first_row[
+                "equity"
+            ]
+        )
+
+    end_equity = float(
+        last_row[
+            "equity"
+        ]
+    )
+
+    if start_equity <= 0:
+
+        return None
+
+    return (
+        (
+            end_equity
+            /
+            start_equity
+            -
+            1
+        )
+        *
+        100
+    )
+
+
+# ============================================================
+# YEARLY MAX DRAWDOWN
+# ============================================================
+
+def v13_yearly_max_drawdown(
+    curve,
+    year,
+):
+
+    rows = [
+
+        x
+
+        for x in curve
+
+        if (
+            x["date"].year
+            ==
+            year
+        )
+    ]
+
+    if not rows:
+
+        return None
+
+    # --------------------------------------------------------
+    # Include the last observation before Jan 1 as the year's
+    # starting equity reference.
+    # --------------------------------------------------------
+
+    previous_rows = [
+
+        x
+
+        for x in curve
+
+        if (
+            x["date"]
+            <
+            rows[0]["date"]
+        )
+    ]
+
+    equity_values = []
+
+    if previous_rows:
+
+        equity_values.append(
+            float(
+                previous_rows[-1][
+                    "equity"
+                ]
+            )
+        )
+
+    equity_values.extend([
+
+        float(
+            x["equity"]
+        )
+
+        for x in rows
+    ])
+
+    if not equity_values:
+
+        return None
+
+    peak = (
+        equity_values[0]
+    )
+
+    max_dd = 0.0
+
+    for equity in equity_values:
+
+        peak = max(
+            peak,
+            equity,
+        )
+
+        if peak > 0:
+
+            dd = (
+                equity
+                /
+                peak
+                -
+                1
+            ) * 100
+
+            max_dd = min(
+                max_dd,
+                dd,
+            )
+
+    return max_dd
+
+
+# ============================================================
+# YEARLY CASH %
+# ============================================================
+
+def v13_yearly_cash_pct(
+    strategy_curve,
+    year,
+):
+
+    rows = [
+
+        x
+
+        for x in strategy_curve
+
+        if (
+            x["date"].year
+            ==
+            year
+        )
+    ]
+
+    if not rows:
+
+        return None
+
+    cash_days = 0
+
+    for item in rows:
+
+        holdings = (
+            item.get(
+                "holdings",
+                ["CASH"],
+            )
+        )
+
+        if (
+            not holdings
+            or
+            holdings == ["CASH"]
+            or
+            "CASH" in holdings
+        ):
+
+            cash_days += 1
+
+    return (
+        cash_days
+        /
+        len(rows)
+        *
+        100
+    )
+
+
+# ============================================================
+# YEARLY TRADE STATISTICS
+# ============================================================
+
+def v13_yearly_trade_statistics(
+    trades,
+    year,
+):
+
+    # --------------------------------------------------------
+    # Attribute a trade to the calendar year in which it exits.
+    #
+    # This avoids splitting one real trade into artificial
+    # December/January pieces.
+    # --------------------------------------------------------
+
+    year_trades = []
+
+    for trade in trades:
+
+        exit_date = (
+            trade.get(
+                "exit_date"
+            )
+        )
+
+        if not exit_date:
+
+            continue
+
+        try:
+
+            exit_year = (
+                pd.Timestamp(
+                    exit_date
+                ).year
+            )
+
+        except Exception:
+
+            continue
+
+        if exit_year == year:
+
+            year_trades.append(
+                trade
+            )
+
+    returns = []
+
+    for trade in year_trades:
+
+        value = (
+            trade.get(
+                "return_pct"
+            )
+        )
+
+        if value is None:
+
+            continue
+
+        try:
+
+            returns.append(
+                float(
+                    value
+                )
+            )
+
+        except Exception:
+
+            pass
+
+    winners = [
+        x
+        for x in returns
+        if x > 0
+    ]
+
+    losers = [
+        x
+        for x in returns
+        if x <= 0
+    ]
+
+    trade_count = (
+        len(
+            returns
+        )
+    )
+
+    win_rate = (
+        len(
+            winners
+        )
+        /
+        trade_count
+        *
+        100
+        if trade_count
+        else 0.0
+    )
+
+    gross_profit = (
+        sum(
+            winners
+        )
+    )
+
+    gross_loss = abs(
+        sum(
+            losers
+        )
+    )
+
+    if gross_loss > 0:
+
+        profit_factor = (
+            gross_profit
+            /
+            gross_loss
+        )
+
+    elif gross_profit > 0:
+
+        # No losing trades.
+        # JSON-safe representation.
+        profit_factor = None
+
+    else:
+
+        profit_factor = 0.0
+
+    average_trade = (
+        float(
+            np.mean(
+                returns
+            )
+        )
+        if returns
+        else 0.0
+    )
+
+    median_trade = (
+        float(
+            np.median(
+                returns
+            )
+        )
+        if returns
+        else 0.0
+    )
+
+    return {
+
+        "trade_count":
+            trade_count,
+
+        "winner_count":
+            len(
+                winners
+            ),
+
+        "loser_count":
+            len(
+                losers
+            ),
+
+        "win_rate_pct":
+            safe_float(
+                win_rate,
+                2,
+            ),
+
+        "profit_factor":
+            safe_float(
+                profit_factor,
+                3,
+            )
+            if profit_factor is not None
+            else None,
+
+        "average_trade_pct":
+            safe_float(
+                average_trade,
+                2,
+            ),
+
+        "median_trade_pct":
+            safe_float(
+                median_trade,
+                2,
+            ),
+    }
+
+
+# ============================================================
+# MAIN YEARLY ANALYSIS
+# ============================================================
+
+def run_v13_yearly_analysis():
+
+    entry_score = 75
+    exit_score = 50
+    transaction_cost_pct = 0.10
+    confirmation_days = 3
+
+    (
+        prepared,
+        common_dates,
+        errors,
+    ) = (
+        v13_yearly_prepare_full_history()
+    )
+
+    # --------------------------------------------------------
+    # Build frozen V1.3 CONFIRM3 data.
+    #
+    # This function already exists in main.py.
+    # --------------------------------------------------------
+
+    confirmed_prepared = (
+        build_v13_confirmed_prepared(
+
+            prepared=
+                prepared,
+
+            confirmation_days=
+                confirmation_days,
+        )
+    )
+
+    # --------------------------------------------------------
+    # Run ONE continuous Top-2 Sticky V1.3 backtest.
+    #
+    # Existing run_rotation_variant() preserves holdings until
+    # their own frozen slow exit.
+    # --------------------------------------------------------
+
+    result = (
+        run_rotation_variant(
+
+            prepared=
+                confirmed_prepared,
+
+            common_dates=
+                common_dates,
+
+            top_n=
+                2,
+
+            entry_score=
+                entry_score,
+
+            exit_score=
+                exit_score,
+
+            transaction_cost_pct=
+                transaction_cost_pct,
+        )
+    )
+
+    strategy_curve = (
+        v13_yearly_strategy_curve(
+
+            result=
+                result,
+
+            first_common_date=
+                common_dates[0],
+        )
+    )
+
+    dbc_curve = (
+        v13_yearly_dbc_curve(
+
+            prepared=
+                prepared,
+
+            common_dates=
+                common_dates,
+        )
+    )
+
+    # --------------------------------------------------------
+    # Calendar years represented in common history.
+    # --------------------------------------------------------
+
+    years = sorted(
+        set(
+            pd.Timestamp(
+                d
+            ).year
+            for d in common_dates
+        )
+    )
+
+    yearly = []
+
+    for year in years:
+
+        strategy_return = (
+            v13_yearly_return_from_curve(
+                strategy_curve,
+                year,
+            )
+        )
+
+        dbc_return = (
+            v13_yearly_return_from_curve(
+                dbc_curve,
+                year,
+            )
+        )
+
+        max_dd = (
+            v13_yearly_max_drawdown(
+                strategy_curve,
+                year,
+            )
+        )
+
+        cash_pct = (
+            v13_yearly_cash_pct(
+                strategy_curve,
+                year,
+            )
+        )
+
+        trade_stats = (
+            v13_yearly_trade_statistics(
+                result[
+                    "trades"
+                ],
+                year,
+            )
+        )
+
+        if (
+            strategy_return is not None
+            and
+            dbc_return is not None
+        ):
+
+            excess_return = (
+                strategy_return
+                -
+                dbc_return
+            )
+
+        else:
+
+            excess_return = None
+
+        year_dates = [
+
+            pd.Timestamp(
+                d
+            )
+
+            for d in common_dates
+
+            if (
+                pd.Timestamp(
+                    d
+                ).year
+                ==
+                year
+            )
+        ]
+
+        if not year_dates:
+
+            continue
+
+        yearly.append({
+
+            "year":
+                year,
+
+            "period_start":
+                str(
+                    year_dates[
+                        0
+                    ].date()
+                ),
+
+            "period_end":
+                str(
+                    year_dates[
+                        -1
+                    ].date()
+                ),
+
+            "trading_days":
+                len(
+                    year_dates
+                ),
+
+            "v13_return_pct":
+                safe_float(
+                    strategy_return,
+                    2,
+                ),
+
+            "dbc_return_pct":
+                safe_float(
+                    dbc_return,
+                    2,
+                ),
+
+            "v13_minus_dbc_pct_points":
+                safe_float(
+                    excess_return,
+                    2,
+                ),
+
+            "max_drawdown_pct":
+                safe_float(
+                    max_dd,
+                    2,
+                ),
+
+            "cash_time_pct":
+                safe_float(
+                    cash_pct,
+                    2,
+                ),
+
+            **trade_stats,
+        })
+
+    # ========================================================
+    # SUMMARY
+    # ========================================================
+
+    complete_years = [
+
+        x
+
+        for x in yearly
+
+        if (
+            x[
+                "v13_return_pct"
+            ]
+            is not None
+        )
+    ]
+
+    positive_years = [
+
+        x
+
+        for x in complete_years
+
+        if (
+            x[
+                "v13_return_pct"
+            ]
+            >
+            0
+        )
+    ]
+
+    negative_years = [
+
+        x
+
+        for x in complete_years
+
+        if (
+            x[
+                "v13_return_pct"
+            ]
+            <
+            0
+        )
+    ]
+
+    beat_dbc_years = [
+
+        x
+
+        for x in complete_years
+
+        if (
+            x[
+                "v13_minus_dbc_pct_points"
+            ]
+            is not None
+            and
+            x[
+                "v13_minus_dbc_pct_points"
+            ]
+            >
+            0
+        )
+    ]
+
+    positive_dbc_years = [
+
+        x
+
+        for x in complete_years
+
+        if (
+            x[
+                "dbc_return_pct"
+            ]
+            is not None
+            and
+            x[
+                "dbc_return_pct"
+            ]
+            >
+            0
+        )
+    ]
+
+    negative_dbc_years = [
+
+        x
+
+        for x in complete_years
+
+        if (
+            x[
+                "dbc_return_pct"
+            ]
+            is not None
+            and
+            x[
+                "dbc_return_pct"
+            ]
+            <
+            0
+        )
+    ]
+
+    # --------------------------------------------------------
+    # Conditional regime description:
+    # How does V1.3 behave in DBC up-years vs down-years?
+    #
+    # DESCRIPTIVE ONLY.
+    # This is NOT a new trading filter.
+    # --------------------------------------------------------
+
+    def average_field(
+        rows,
+        field,
+    ):
+
+        values = [
+
+            float(
+                x[
+                    field
+                ]
+            )
+
+            for x in rows
+
+            if (
+                x.get(
+                    field
+                )
+                is not None
+            )
+        ]
+
+        if not values:
+
+            return None
+
+        return float(
+            np.mean(
+                values
+            )
+        )
+
+    regime_summary = {
+
+        "dbc_positive_years": {
+
+            "year_count":
+                len(
+                    positive_dbc_years
+                ),
+
+            "average_v13_return_pct":
+                safe_float(
+                    average_field(
+                        positive_dbc_years,
+                        "v13_return_pct",
+                    ),
+                    2,
+                ),
+
+            "average_dbc_return_pct":
+                safe_float(
+                    average_field(
+                        positive_dbc_years,
+                        "dbc_return_pct",
+                    ),
+                    2,
+                ),
+
+            "average_v13_minus_dbc_pct_points":
+                safe_float(
+                    average_field(
+                        positive_dbc_years,
+                        "v13_minus_dbc_pct_points",
+                    ),
+                    2,
+                ),
+
+            "average_max_drawdown_pct":
+                safe_float(
+                    average_field(
+                        positive_dbc_years,
+                        "max_drawdown_pct",
+                    ),
+                    2,
+                ),
+
+            "average_cash_time_pct":
+                safe_float(
+                    average_field(
+                        positive_dbc_years,
+                        "cash_time_pct",
+                    ),
+                    2,
+                ),
+        },
+
+        "dbc_negative_years": {
+
+            "year_count":
+                len(
+                    negative_dbc_years
+                ),
+
+            "average_v13_return_pct":
+                safe_float(
+                    average_field(
+                        negative_dbc_years,
+                        "v13_return_pct",
+                    ),
+                    2,
+                ),
+
+            "average_dbc_return_pct":
+                safe_float(
+                    average_field(
+                        negative_dbc_years,
+                        "dbc_return_pct",
+                    ),
+                    2,
+                ),
+
+            "average_v13_minus_dbc_pct_points":
+                safe_float(
+                    average_field(
+                        negative_dbc_years,
+                        "v13_minus_dbc_pct_points",
+                    ),
+                    2,
+                ),
+
+            "average_max_drawdown_pct":
+                safe_float(
+                    average_field(
+                        negative_dbc_years,
+                        "max_drawdown_pct",
+                    ),
+                    2,
+                ),
+
+            "average_cash_time_pct":
+                safe_float(
+                    average_field(
+                        negative_dbc_years,
+                        "cash_time_pct",
+                    ),
+                    2,
+                ),
+        },
+    }
+
+    # --------------------------------------------------------
+    # Overall DBC return over same continuous period.
+    # --------------------------------------------------------
+
+    first_date = (
+        common_dates[0]
+    )
+
+    last_date = (
+        common_dates[-1]
+    )
+
+    dbc_first_open = float(
+        prepared[
+            "DBC"
+        ].loc[
+            first_date,
+            "Open",
+        ]
+    )
+
+    dbc_last_close = float(
+        prepared[
+            "DBC"
+        ].loc[
+            last_date,
+            "Close",
+        ]
+    )
+
+    dbc_total_return = (
+        (
+            dbc_last_close
+            /
+            dbc_first_open
+            -
+            1
+        )
+        *
+        100
+    )
+
+    return {
+
+        "test":
+            "V1.3_CONTINUOUS_YEARLY_REGIME_ANALYSIS",
+
+        "model":
+            "V1.3_CONFIRM3",
+
+        "generated_at_utc":
+            utc_now(),
+
+        "methodology": {
+
+            "strategy_modified":
+                False,
+
+            "parameter_optimization":
+                False,
+
+            "new_trading_filter":
+                False,
+
+            "threshold_search":
+                False,
+
+            "portfolio":
+                "TOP_2_EQUAL_WEIGHT",
+
+            "sticky_rotation":
+                True,
+
+            "entry_score":
+                entry_score,
+
+            "exit_score":
+                exit_score,
+
+            "confirmation_days":
+                confirmation_days,
+
+            "transaction_cost_pct_each_side":
+                transaction_cost_pct,
+
+            "ranking":
+                "SCORE, MOM120, MOM60, MOM20",
+
+            "entry_rule":
+                (
+                    "AL_ADAYI and score >= 75 "
+                    "for 3 consecutive closes"
+                ),
+
+            "exit_rule":
+                (
+                    "score <= 50 OR EMA20 < EMA50 "
+                    "OR Close < EMA100 OR EMA50 < EMA200"
+                ),
+
+            "execution":
+                (
+                    "Signal at close, execution at "
+                    "next trading day open"
+                ),
+
+            "year_boundary_handling":
+                (
+                    "Continuous portfolio. Positions are NOT "
+                    "closed or reset at calendar-year boundaries."
+                ),
+
+            "yearly_trade_attribution":
+                (
+                    "Trades are attributed to the calendar "
+                    "year of their exit. Trades are not split "
+                    "at December 31."
+                ),
+
+            "benchmark":
+                (
+                    "DBC buy-and-hold over the same common "
+                    "trading dates"
+                ),
+
+            "long_only":
+                True,
+
+            "leverage":
+                False,
+
+            "automatic_orders":
+                False,
+        },
+
+        "full_period": {
+
+            "start":
+                str(
+                    pd.Timestamp(
+                        first_date
+                    ).date()
+                ),
+
+            "end":
+                str(
+                    pd.Timestamp(
+                        last_date
+                    ).date()
+                ),
+
+            "common_trading_days":
+                len(
+                    common_dates
+                ),
+
+            "calendar_year_count":
+                len(
+                    yearly
+                ),
+        },
+
+        "full_period_performance": {
+
+            "v13":
+                result[
+                    "performance"
+                ],
+
+            "dbc_buy_hold_return_pct":
+                safe_float(
+                    dbc_total_return,
+                    2,
+                ),
+        },
+
+        "year_summary": {
+
+            "years_analyzed":
+                len(
+                    complete_years
+                ),
+
+            "positive_v13_years":
+                len(
+                    positive_years
+                ),
+
+            "negative_v13_years":
+                len(
+                    negative_years
+                ),
+
+            "v13_beats_dbc_years":
+                len(
+                    beat_dbc_years
+                ),
+
+            "v13_positive_year_pct":
+                safe_float(
+                    (
+                        len(
+                            positive_years
+                        )
+                        /
+                        len(
+                            complete_years
+                        )
+                        *
+                        100
+                    )
+                    if complete_years
+                    else 0,
+                    2,
+                ),
+
+            "v13_beats_dbc_year_pct":
+                safe_float(
+                    (
+                        len(
+                            beat_dbc_years
+                        )
+                        /
+                        len(
+                            complete_years
+                        )
+                        *
+                        100
+                    )
+                    if complete_years
+                    else 0,
+                    2,
+                ),
+        },
+
+        "descriptive_regime_summary":
+            regime_summary,
+
+        "yearly_results":
+            yearly,
+
+        "data_errors":
+            errors,
+
+        "interpretation_warning":
+            (
+                "This endpoint is descriptive only. "
+                "Do not select new strategy parameters or "
+                "filters solely from these calendar-year results."
+            ),
+    }
+
+
+# ============================================================
+# API ENDPOINT
+# ============================================================
+
+@app.get(
+    "/v13-yearly-analysis"
+)
+def v13_yearly_analysis_endpoint():
+
+    try:
+
+        return (
+            run_v13_yearly_analysis()
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+
+            status_code=400,
+
+            detail=str(
+                exc
+            ),
+        )
