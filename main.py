@@ -14994,3 +14994,1761 @@ def v13_yearly_analysis_endpoint():
                 exc
             ),
         )
+
+# ============================================================
+# V1.3 2021 vs 2023 REGIME DIAGNOSTIC
+# ============================================================
+#
+# PURPOSE
+# -------
+# Compare entry conditions in:
+#
+#   2021 = strong V1.3 regime
+#   2023 = weak V1.3 regime
+#
+# DIAGNOSTIC ONLY.
+#
+# IMPORTANT
+# ---------
+# - NO strategy modification
+# - NO parameter optimization
+# - NO new filter
+# - NO threshold search
+# - NO asset exclusion
+#
+# We run ONE continuous frozen V1.3 CONFIRM3 portfolio.
+#
+# For entries executed in 2021 and 2023 we capture:
+#
+# - SCORE
+# - MOM20 / MOM60 / MOM120
+# - RSI14
+# - MACD histogram
+# - ATR%
+# - distance from EMA20 / EMA50 / EMA100 / EMA200
+# - EMA20 vs EMA50 spread
+# - EMA50 vs EMA200 spread
+# - EMA20 vs EMA200 spread
+# - 252-day drawdown
+# - volume ratio
+#
+# AND:
+#
+# Forward returns from the ENTRY OPEN:
+#
+# - 5 trading days
+# - 10 trading days
+# - 20 trading days
+# - 40 trading days
+#
+# Forward returns are DIAGNOSTIC ONLY.
+# They are NOT used by the strategy.
+#
+# ============================================================
+
+
+def v13_regime_diag_float(
+    value,
+    digits=4,
+):
+
+    try:
+
+        if value is None:
+
+            return None
+
+        if pd.isna(
+            value
+        ):
+
+            return None
+
+        value = float(
+            value
+        )
+
+        if (
+            math.isnan(
+                value
+            )
+            or
+            math.isinf(
+                value
+            )
+        ):
+
+            return None
+
+        return round(
+            value,
+            digits,
+        )
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# FORWARD RETURN FROM ENTRY OPEN
+# ============================================================
+
+def v13_regime_forward_return(
+    df,
+    entry_date,
+    trading_days,
+):
+
+    try:
+
+        entry_date = (
+            pd.Timestamp(
+                entry_date
+            )
+        )
+
+        if (
+            entry_date
+            not in
+            df.index
+        ):
+
+            return None
+
+        location = (
+            df.index.get_loc(
+                entry_date
+            )
+        )
+
+        # ----------------------------------------------------
+        # Protect against unusual duplicate-index behaviour.
+        # ----------------------------------------------------
+
+        if not isinstance(
+            location,
+            (
+                int,
+                np.integer,
+            ),
+        ):
+
+            return None
+
+        target_location = (
+            int(
+                location
+            )
+            +
+            int(
+                trading_days
+            )
+        )
+
+        if (
+            target_location
+            >=
+            len(
+                df
+            )
+        ):
+
+            return None
+
+        entry_open = float(
+            df.iloc[
+                int(
+                    location
+                )
+            ][
+                "Open"
+            ]
+        )
+
+        target_close = float(
+            df.iloc[
+                target_location
+            ][
+                "Close"
+            ]
+        )
+
+        if entry_open <= 0:
+
+            return None
+
+        return (
+            (
+                target_close
+                /
+                entry_open
+                -
+                1
+            )
+            *
+            100
+        )
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# ENTRY FEATURE SNAPSHOT
+# ============================================================
+
+def v13_regime_entry_snapshot(
+    prepared,
+    symbol,
+    entry_date,
+):
+
+    if (
+        symbol
+        not in
+        prepared
+    ):
+
+        return None
+
+    df = (
+        prepared[
+            symbol
+        ]
+    )
+
+    entry_date = (
+        pd.Timestamp(
+            entry_date
+        )
+    )
+
+    if (
+        entry_date
+        not in
+        df.index
+    ):
+
+        return None
+
+    # --------------------------------------------------------
+    # V1.3 executes at NEXT OPEN.
+    #
+    # Therefore all entry features MUST come from the
+    # immediately preceding CLOSE.
+    #
+    # This prevents look-ahead.
+    # --------------------------------------------------------
+
+    previous_dates = (
+        df.index[
+            df.index
+            <
+            entry_date
+        ]
+    )
+
+    if (
+        len(
+            previous_dates
+        )
+        ==
+        0
+    ):
+
+        return None
+
+    signal_date = (
+        previous_dates[
+            -1
+        ]
+    )
+
+    row = (
+        df.loc[
+            signal_date
+        ]
+    )
+
+    # --------------------------------------------------------
+    # EMA SPREADS
+    # --------------------------------------------------------
+
+    ema20 = float(
+        row[
+            "EMA20"
+        ]
+    )
+
+    ema50 = float(
+        row[
+            "EMA50"
+        ]
+    )
+
+    ema100 = float(
+        row[
+            "EMA100"
+        ]
+    )
+
+    ema200 = float(
+        row[
+            "EMA200"
+        ]
+    )
+
+    close = float(
+        row[
+            "Close"
+        ]
+    )
+
+    def pct_above(
+        numerator,
+        denominator,
+    ):
+
+        if denominator == 0:
+
+            return None
+
+        return (
+            numerator
+            /
+            denominator
+            -
+            1
+        ) * 100
+
+    dist_ema100 = (
+        pct_above(
+            close,
+            ema100,
+        )
+    )
+
+    ema20_vs_ema50 = (
+        pct_above(
+            ema20,
+            ema50,
+        )
+    )
+
+    ema50_vs_ema200 = (
+        pct_above(
+            ema50,
+            ema200,
+        )
+    )
+
+    ema20_vs_ema200 = (
+        pct_above(
+            ema20,
+            ema200,
+        )
+    )
+
+    # --------------------------------------------------------
+    # FORWARD RETURNS
+    # --------------------------------------------------------
+
+    forward_5d = (
+        v13_regime_forward_return(
+            df,
+            entry_date,
+            5,
+        )
+    )
+
+    forward_10d = (
+        v13_regime_forward_return(
+            df,
+            entry_date,
+            10,
+        )
+    )
+
+    forward_20d = (
+        v13_regime_forward_return(
+            df,
+            entry_date,
+            20,
+        )
+    )
+
+    forward_40d = (
+        v13_regime_forward_return(
+            df,
+            entry_date,
+            40,
+        )
+    )
+
+    return {
+
+        "symbol":
+            symbol,
+
+        "signal_date":
+            str(
+                pd.Timestamp(
+                    signal_date
+                ).date()
+            ),
+
+        "entry_date":
+            str(
+                entry_date.date()
+            ),
+
+        "entry_year":
+            int(
+                entry_date.year
+            ),
+
+        "score":
+            safe_int(
+                row[
+                    "SCORE"
+                ]
+            ),
+
+        "model_signal":
+            str(
+                row[
+                    "MODEL_SIGNAL"
+                ]
+            ),
+
+        "mom20_pct":
+            v13_regime_diag_float(
+                row[
+                    "MOM20"
+                ]
+            ),
+
+        "mom60_pct":
+            v13_regime_diag_float(
+                row[
+                    "MOM60"
+                ]
+            ),
+
+        "mom120_pct":
+            v13_regime_diag_float(
+                row[
+                    "MOM120"
+                ]
+            ),
+
+        "rsi14":
+            v13_regime_diag_float(
+                row[
+                    "RSI14"
+                ]
+            ),
+
+        "macd":
+            v13_regime_diag_float(
+                row[
+                    "MACD"
+                ]
+            ),
+
+        "macd_signal":
+            v13_regime_diag_float(
+                row[
+                    "MACD_SIGNAL"
+                ]
+            ),
+
+        "macd_hist":
+            v13_regime_diag_float(
+                row[
+                    "MACD_HIST"
+                ]
+            ),
+
+        "atr_pct":
+            v13_regime_diag_float(
+                row[
+                    "ATR_PCT"
+                ]
+            ),
+
+        "volume_ratio":
+            v13_regime_diag_float(
+                row[
+                    "VOLUME_RATIO"
+                ]
+            ),
+
+        "dist_ema20_pct":
+            v13_regime_diag_float(
+                row[
+                    "DIST_EMA20"
+                ]
+            ),
+
+        "dist_ema50_pct":
+            v13_regime_diag_float(
+                row[
+                    "DIST_EMA50"
+                ]
+            ),
+
+        "dist_ema100_pct":
+            v13_regime_diag_float(
+                dist_ema100
+            ),
+
+        "dist_ema200_pct":
+            v13_regime_diag_float(
+                row[
+                    "DIST_EMA200"
+                ]
+            ),
+
+        "ema20_vs_ema50_pct":
+            v13_regime_diag_float(
+                ema20_vs_ema50
+            ),
+
+        "ema50_vs_ema200_pct":
+            v13_regime_diag_float(
+                ema50_vs_ema200
+            ),
+
+        "ema20_vs_ema200_pct":
+            v13_regime_diag_float(
+                ema20_vs_ema200
+            ),
+
+        "drawdown_252_pct":
+            v13_regime_diag_float(
+                row[
+                    "DRAWDOWN_252"
+                ]
+            ),
+
+        "forward_5d_pct":
+            v13_regime_diag_float(
+                forward_5d
+            ),
+
+        "forward_10d_pct":
+            v13_regime_diag_float(
+                forward_10d
+            ),
+
+        "forward_20d_pct":
+            v13_regime_diag_float(
+                forward_20d
+            ),
+
+        "forward_40d_pct":
+            v13_regime_diag_float(
+                forward_40d
+            ),
+    }
+
+
+# ============================================================
+# GROUP STATISTICS
+# ============================================================
+
+def v13_regime_group_summary(
+    rows,
+):
+
+    fields = [
+
+        "score",
+
+        "mom20_pct",
+        "mom60_pct",
+        "mom120_pct",
+
+        "rsi14",
+
+        "macd_hist",
+
+        "atr_pct",
+
+        "volume_ratio",
+
+        "dist_ema20_pct",
+        "dist_ema50_pct",
+        "dist_ema100_pct",
+        "dist_ema200_pct",
+
+        "ema20_vs_ema50_pct",
+        "ema50_vs_ema200_pct",
+        "ema20_vs_ema200_pct",
+
+        "drawdown_252_pct",
+
+        "forward_5d_pct",
+        "forward_10d_pct",
+        "forward_20d_pct",
+        "forward_40d_pct",
+    ]
+
+    output = {
+
+        "entry_count":
+            len(
+                rows
+            ),
+    }
+
+    for field in fields:
+
+        values = []
+
+        for row in rows:
+
+            value = (
+                row.get(
+                    field
+                )
+            )
+
+            if value is None:
+
+                continue
+
+            try:
+
+                value = float(
+                    value
+                )
+
+                if (
+                    math.isnan(
+                        value
+                    )
+                    or
+                    math.isinf(
+                        value
+                    )
+                ):
+
+                    continue
+
+                values.append(
+                    value
+                )
+
+            except Exception:
+
+                continue
+
+        if values:
+
+            output[
+                field
+            ] = {
+
+                "mean":
+                    v13_regime_diag_float(
+                        np.mean(
+                            values
+                        )
+                    ),
+
+                "median":
+                    v13_regime_diag_float(
+                        np.median(
+                            values
+                        )
+                    ),
+
+                "min":
+                    v13_regime_diag_float(
+                        np.min(
+                            values
+                        )
+                    ),
+
+                "max":
+                    v13_regime_diag_float(
+                        np.max(
+                            values
+                        )
+                    ),
+
+                "count":
+                    len(
+                        values
+                    ),
+            }
+
+        else:
+
+            output[
+                field
+            ] = {
+
+                "mean":
+                    None,
+
+                "median":
+                    None,
+
+                "min":
+                    None,
+
+                "max":
+                    None,
+
+                "count":
+                    0,
+            }
+
+    return output
+
+
+# ============================================================
+# YEAR DIFFERENCE
+# 2021 MEAN - 2023 MEAN
+# ============================================================
+
+def v13_regime_mean_difference(
+    summary_2021,
+    summary_2023,
+):
+
+    fields = [
+
+        "score",
+
+        "mom20_pct",
+        "mom60_pct",
+        "mom120_pct",
+
+        "rsi14",
+
+        "macd_hist",
+
+        "atr_pct",
+
+        "volume_ratio",
+
+        "dist_ema20_pct",
+        "dist_ema50_pct",
+        "dist_ema100_pct",
+        "dist_ema200_pct",
+
+        "ema20_vs_ema50_pct",
+        "ema50_vs_ema200_pct",
+        "ema20_vs_ema200_pct",
+
+        "drawdown_252_pct",
+
+        "forward_5d_pct",
+        "forward_10d_pct",
+        "forward_20d_pct",
+        "forward_40d_pct",
+    ]
+
+    output = {}
+
+    for field in fields:
+
+        value_2021 = (
+            summary_2021
+            .get(
+                field,
+                {},
+            )
+            .get(
+                "mean"
+            )
+        )
+
+        value_2023 = (
+            summary_2023
+            .get(
+                field,
+                {},
+            )
+            .get(
+                "mean"
+            )
+        )
+
+        if (
+            value_2021 is None
+            or
+            value_2023 is None
+        ):
+
+            output[
+                field
+            ] = None
+
+            continue
+
+        output[
+            field
+        ] = (
+            v13_regime_diag_float(
+                float(
+                    value_2021
+                )
+                -
+                float(
+                    value_2023
+                )
+            )
+        )
+
+    return output
+
+
+# ============================================================
+# POSITIVE FORWARD RETURN RATES
+# ============================================================
+
+def v13_regime_forward_success_rates(
+    rows,
+):
+
+    horizons = {
+
+        "5d":
+            "forward_5d_pct",
+
+        "10d":
+            "forward_10d_pct",
+
+        "20d":
+            "forward_20d_pct",
+
+        "40d":
+            "forward_40d_pct",
+    }
+
+    output = {}
+
+    for label, field in (
+        horizons.items()
+    ):
+
+        values = [
+
+            float(
+                row[
+                    field
+                ]
+            )
+
+            for row in rows
+
+            if (
+                row.get(
+                    field
+                )
+                is not None
+            )
+        ]
+
+        if not values:
+
+            output[
+                label
+            ] = {
+
+                "count":
+                    0,
+
+                "positive_count":
+                    0,
+
+                "positive_rate_pct":
+                    None,
+            }
+
+            continue
+
+        positive = [
+
+            x
+
+            for x in values
+
+            if x > 0
+        ]
+
+        output[
+            label
+        ] = {
+
+            "count":
+                len(
+                    values
+                ),
+
+            "positive_count":
+                len(
+                    positive
+                ),
+
+            "positive_rate_pct":
+                v13_regime_diag_float(
+                    len(
+                        positive
+                    )
+                    /
+                    len(
+                        values
+                    )
+                    *
+                    100,
+                    2,
+                ),
+        }
+
+    return output
+
+
+# ============================================================
+# ATTACH ACTUAL TRADE RESULT
+# ============================================================
+
+def v13_regime_attach_trade_results(
+    entries,
+    trades,
+):
+
+    # --------------------------------------------------------
+    # Index actual trades by symbol + entry date.
+    # --------------------------------------------------------
+
+    trade_lookup = {}
+
+    for trade in trades:
+
+        symbol = (
+            trade.get(
+                "symbol"
+            )
+        )
+
+        entry_date = (
+            trade.get(
+                "entry_date"
+            )
+        )
+
+        if (
+            not symbol
+            or
+            not entry_date
+        ):
+
+            continue
+
+        key = (
+            str(
+                symbol
+            ),
+            str(
+                pd.Timestamp(
+                    entry_date
+                ).date()
+            ),
+        )
+
+        trade_lookup[
+            key
+        ] = trade
+
+    output = []
+
+    for entry in entries:
+
+        item = dict(
+            entry
+        )
+
+        key = (
+            str(
+                item[
+                    "symbol"
+                ]
+            ),
+            str(
+                pd.Timestamp(
+                    item[
+                        "entry_date"
+                    ]
+                ).date()
+            ),
+        )
+
+        trade = (
+            trade_lookup.get(
+                key
+            )
+        )
+
+        if trade is None:
+
+            item[
+                "actual_trade_exit_date"
+            ] = None
+
+            item[
+                "actual_trade_return_pct"
+            ] = None
+
+            item[
+                "actual_holding_days"
+            ] = None
+
+            item[
+                "actual_trade_outcome"
+            ] = None
+
+        else:
+
+            item[
+                "actual_trade_exit_date"
+            ] = (
+                trade.get(
+                    "exit_date"
+                )
+            )
+
+            actual_return = (
+                trade.get(
+                    "return_pct"
+                )
+            )
+
+            item[
+                "actual_trade_return_pct"
+            ] = (
+                v13_regime_diag_float(
+                    actual_return,
+                    2,
+                )
+                if actual_return
+                is not None
+                else None
+            )
+
+            item[
+                "actual_holding_days"
+            ] = (
+                trade.get(
+                    "holding_days"
+                )
+            )
+
+            if actual_return is None:
+
+                outcome = None
+
+            elif float(
+                actual_return
+            ) > 0:
+
+                outcome = (
+                    "WINNER"
+                )
+
+            else:
+
+                outcome = (
+                    "LOSER"
+                )
+
+            item[
+                "actual_trade_outcome"
+            ] = outcome
+
+        output.append(
+            item
+        )
+
+    return output
+
+
+# ============================================================
+# MAIN 2021 vs 2023 DIAGNOSTIC
+# ============================================================
+
+def run_v13_2021_vs_2023_diagnostic():
+
+    entry_score = 75
+    exit_score = 50
+    transaction_cost_pct = 0.10
+    confirmation_days = 3
+
+    # --------------------------------------------------------
+    # SAME full-history preparation used by yearly analysis.
+    # --------------------------------------------------------
+
+    (
+        prepared,
+        common_dates,
+        errors,
+    ) = (
+        v13_yearly_prepare_full_history()
+    )
+
+    # --------------------------------------------------------
+    # SAME frozen V1.3 CONFIRM3.
+    # --------------------------------------------------------
+
+    confirmed_prepared = (
+        build_v13_confirmed_prepared(
+
+            prepared=
+                prepared,
+
+            confirmation_days=
+                confirmation_days,
+        )
+    )
+
+    # --------------------------------------------------------
+    # ONE continuous Top-2 Sticky run.
+    # --------------------------------------------------------
+
+    result = (
+        run_rotation_variant(
+
+            prepared=
+                confirmed_prepared,
+
+            common_dates=
+                common_dates,
+
+            top_n=
+                2,
+
+            entry_score=
+                entry_score,
+
+            exit_score=
+                exit_score,
+
+            transaction_cost_pct=
+                transaction_cost_pct,
+        )
+    )
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    #
+    # Rebalances contain actual entries generated by the
+    # portfolio engine.
+    #
+    # We use those actual entry events rather than simply
+    # looking for every AL_ADAYI signal.
+    # --------------------------------------------------------
+
+    entry_events = []
+
+    seen_entries = set()
+
+    for rebalance in (
+        result[
+            "rebalances"
+        ]
+    ):
+
+        execution_date = (
+            rebalance.get(
+                "execution_date"
+            )
+        )
+
+        entering = (
+            rebalance.get(
+                "entering",
+                [],
+            )
+        )
+
+        if (
+            not execution_date
+            or
+            not entering
+        ):
+
+            continue
+
+        execution_ts = (
+            pd.Timestamp(
+                execution_date
+            )
+        )
+
+        if (
+            execution_ts.year
+            not in
+            (
+                2021,
+                2023,
+            )
+        ):
+
+            continue
+
+        for symbol in entering:
+
+            key = (
+                symbol,
+                str(
+                    execution_ts.date()
+                ),
+            )
+
+            if key in seen_entries:
+
+                continue
+
+            seen_entries.add(
+                key
+            )
+
+            snapshot = (
+                v13_regime_entry_snapshot(
+
+                    prepared=
+                        confirmed_prepared,
+
+                    symbol=
+                        symbol,
+
+                    entry_date=
+                        execution_ts,
+                )
+            )
+
+            if snapshot is not None:
+
+                entry_events.append(
+                    snapshot
+                )
+
+    # --------------------------------------------------------
+    # Attach actual slow-exit trade outcome.
+    # --------------------------------------------------------
+
+    entry_events = (
+        v13_regime_attach_trade_results(
+
+            entries=
+                entry_events,
+
+            trades=
+                result[
+                    "trades"
+                ],
+        )
+    )
+
+    entries_2021 = [
+
+        x
+
+        for x in entry_events
+
+        if (
+            x[
+                "entry_year"
+            ]
+            ==
+            2021
+        )
+    ]
+
+    entries_2023 = [
+
+        x
+
+        for x in entry_events
+
+        if (
+            x[
+                "entry_year"
+            ]
+            ==
+            2023
+        )
+    ]
+
+    # --------------------------------------------------------
+    # Group summaries.
+    # --------------------------------------------------------
+
+    summary_2021 = (
+        v13_regime_group_summary(
+            entries_2021
+        )
+    )
+
+    summary_2023 = (
+        v13_regime_group_summary(
+            entries_2023
+        )
+    )
+
+    mean_difference = (
+        v13_regime_mean_difference(
+            summary_2021,
+            summary_2023,
+        )
+    )
+
+    forward_success_2021 = (
+        v13_regime_forward_success_rates(
+            entries_2021
+        )
+    )
+
+    forward_success_2023 = (
+        v13_regime_forward_success_rates(
+            entries_2023
+        )
+    )
+
+    # --------------------------------------------------------
+    # Actual trade winner / loser counts by ENTRY YEAR.
+    #
+    # NOTE:
+    # This is different from the yearly-analysis endpoint,
+    # which attributes realized trades by EXIT YEAR.
+    # --------------------------------------------------------
+
+    def actual_trade_summary(
+        rows,
+    ):
+
+        completed = [
+
+            x
+
+            for x in rows
+
+            if (
+                x.get(
+                    "actual_trade_return_pct"
+                )
+                is not None
+            )
+        ]
+
+        winners = [
+
+            x
+
+            for x in completed
+
+            if (
+                float(
+                    x[
+                        "actual_trade_return_pct"
+                    ]
+                )
+                >
+                0
+            )
+        ]
+
+        losers = [
+
+            x
+
+            for x in completed
+
+            if (
+                float(
+                    x[
+                        "actual_trade_return_pct"
+                    ]
+                )
+                <=
+                0
+            )
+        ]
+
+        returns = [
+
+            float(
+                x[
+                    "actual_trade_return_pct"
+                ]
+            )
+
+            for x in completed
+        ]
+
+        gross_profit = sum(
+            x
+            for x in returns
+            if x > 0
+        )
+
+        gross_loss = abs(
+            sum(
+                x
+                for x in returns
+                if x <= 0
+            )
+        )
+
+        if gross_loss > 0:
+
+            pf = (
+                gross_profit
+                /
+                gross_loss
+            )
+
+        elif gross_profit > 0:
+
+            pf = None
+
+        else:
+
+            pf = 0.0
+
+        return {
+
+            "entry_count":
+                len(
+                    rows
+                ),
+
+            "completed_trade_count":
+                len(
+                    completed
+                ),
+
+            "winner_count":
+                len(
+                    winners
+                ),
+
+            "loser_count":
+                len(
+                    losers
+                ),
+
+            "win_rate_pct":
+                v13_regime_diag_float(
+                    (
+                        len(
+                            winners
+                        )
+                        /
+                        len(
+                            completed
+                        )
+                        *
+                        100
+                    )
+                    if completed
+                    else 0,
+                    2,
+                ),
+
+            "profit_factor":
+                (
+                    v13_regime_diag_float(
+                        pf,
+                        3,
+                    )
+                    if pf is not None
+                    else None
+                ),
+
+            "average_trade_return_pct":
+                (
+                    v13_regime_diag_float(
+                        np.mean(
+                            returns
+                        ),
+                        2,
+                    )
+                    if returns
+                    else 0
+                ),
+
+            "median_trade_return_pct":
+                (
+                    v13_regime_diag_float(
+                        np.median(
+                            returns
+                        ),
+                        2,
+                    )
+                    if returns
+                    else 0
+                ),
+        }
+
+    actual_2021 = (
+        actual_trade_summary(
+            entries_2021
+        )
+    )
+
+    actual_2023 = (
+        actual_trade_summary(
+            entries_2023
+        )
+    )
+
+    # --------------------------------------------------------
+    # Sort entries chronologically for easy inspection.
+    # --------------------------------------------------------
+
+    entries_2021 = sorted(
+
+        entries_2021,
+
+        key=lambda x:
+            x[
+                "entry_date"
+            ],
+    )
+
+    entries_2023 = sorted(
+
+        entries_2023,
+
+        key=lambda x:
+            x[
+                "entry_date"
+            ],
+    )
+
+    return {
+
+        "test":
+            "V1.3_2021_VS_2023_REGIME_DIAGNOSTIC",
+
+        "model":
+            "V1.3_CONFIRM3",
+
+        "generated_at_utc":
+            utc_now(),
+
+        "methodology": {
+
+            "strategy_modified":
+                False,
+
+            "parameter_optimization":
+                False,
+
+            "new_trading_filter":
+                False,
+
+            "threshold_search":
+                False,
+
+            "asset_exclusion":
+                False,
+
+            "portfolio":
+                "TOP_2_EQUAL_WEIGHT",
+
+            "sticky_rotation":
+                True,
+
+            "entry_score":
+                entry_score,
+
+            "exit_score":
+                exit_score,
+
+            "confirmation_days":
+                confirmation_days,
+
+            "transaction_cost_pct_each_side":
+                transaction_cost_pct,
+
+            "ranking":
+                "SCORE, MOM120, MOM60, MOM20",
+
+            "entry_rule":
+                (
+                    "AL_ADAYI and score >= 75 "
+                    "for 3 consecutive closes"
+                ),
+
+            "exit_rule":
+                (
+                    "score <= 50 OR EMA20 < EMA50 "
+                    "OR Close < EMA100 OR EMA50 < EMA200"
+                ),
+
+            "execution":
+                (
+                    "Signal at close, execution at "
+                    "next trading day open"
+                ),
+
+            "entry_feature_timestamp":
+                (
+                    "Immediately preceding signal-date close; "
+                    "no entry-day future information used"
+                ),
+
+            "forward_return_definition":
+                (
+                    "Diagnostic future Close relative to actual "
+                    "entry Open after 5, 10, 20 and 40 trading days"
+                ),
+
+            "forward_returns_used_for_trading":
+                False,
+
+            "continuous_portfolio":
+                True,
+
+            "long_only":
+                True,
+
+            "leverage":
+                False,
+
+            "automatic_orders":
+                False,
+        },
+
+        "comparison": {
+
+            "successful_regime":
+                2021,
+
+            "weak_regime":
+                2023,
+
+            "important_note":
+                (
+                    "Actual trade statistics here are grouped "
+                    "by ENTRY YEAR. The earlier yearly-analysis "
+                    "endpoint grouped realized trades by EXIT YEAR."
+                ),
+        },
+
+        "2021": {
+
+            "entry_year":
+                2021,
+
+            "entry_feature_summary":
+                summary_2021,
+
+            "forward_positive_rates":
+                forward_success_2021,
+
+            "actual_trade_summary_by_entry_year":
+                actual_2021,
+
+            "entries":
+                entries_2021,
+        },
+
+        "2023": {
+
+            "entry_year":
+                2023,
+
+            "entry_feature_summary":
+                summary_2023,
+
+            "forward_positive_rates":
+                forward_success_2023,
+
+            "actual_trade_summary_by_entry_year":
+                actual_2023,
+
+            "entries":
+                entries_2023,
+        },
+
+        "mean_difference_2021_minus_2023":
+            mean_difference,
+
+        "full_continuous_run_reference": {
+
+            "start":
+                str(
+                    pd.Timestamp(
+                        common_dates[
+                            0
+                        ]
+                    ).date()
+                ),
+
+            "end":
+                str(
+                    pd.Timestamp(
+                        common_dates[
+                            -1
+                        ]
+                    ).date()
+                ),
+
+            "common_trading_days":
+                len(
+                    common_dates
+                ),
+
+            "performance":
+                result[
+                    "performance"
+                ],
+        },
+
+        "data_errors":
+            errors,
+
+        "interpretation_warning":
+            (
+                "Descriptive diagnostic only. "
+                "Do not create a new filter or select thresholds "
+                "from this comparison alone."
+            ),
+    }
+
+
+# ============================================================
+# API ENDPOINT
+# ============================================================
+
+@app.get(
+    "/v13-2021-vs-2023-diagnostic"
+)
+def v13_2021_vs_2023_diagnostic_endpoint():
+
+    try:
+
+        return (
+            run_v13_2021_vs_2023_diagnostic()
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+
+            status_code=400,
+
+            detail=str(
+                exc
+            ),
+        )
