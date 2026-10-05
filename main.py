@@ -1,3 +1,12 @@
+# ============================================================
+# V1.3-WEEKLY: haftalik Telegram bulteni + veri onbellegi (ekleme)
+# Mevcut strateji kurallari DEGISMEDI. Eklenenler:
+#  - download_history: onbellek + yeniden deneme + eski-cache yedegi
+#  - run_simple_commodity_momentum: rebalance="weekly" secenegi
+#  - /weekly-bulletin (onizleme), /weekly-bulletin-send, /weekly-bulletin-state,
+#    /weekly-set-holdings, /telegram-test + otomatik cuma bulteni
+# Yalniz uzun, kaldiracsiz, otomatik emirsiz.
+# ============================================================
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 import yfinance as yf
@@ -115,7 +124,7 @@ def safe_int(value):
 # DATA
 # ============================================================
 
-def download_history(symbol, period="10y"):
+def _download_history_yf(symbol, period="10y"):
 
     symbol = symbol.upper()
 
@@ -189,6 +198,65 @@ def download_history(symbol, period="10y"):
         )
 
     return df
+
+
+import os
+import time
+import json
+import asyncio
+import threading
+from datetime import timedelta
+
+HISTORY_CACHE_TTL_SECONDS = int(os.getenv("HISTORY_CACHE_TTL_SECONDS", "21600"))
+HISTORY_RETRIES = 3
+BULLETIN_DATA_DIR = os.getenv("DATA_DIR", "/tmp")
+_HISTORY_CACHE = {}
+HISTORY_META = {}
+
+
+def _history_disk_path(symbol, period):
+    return os.path.join(BULLETIN_DATA_DIR, f"commodity_hist_{symbol}_{period}.pkl")
+
+
+def download_history(symbol, period="10y"):
+    """
+    Onbellekli veri: 6 saat RAM cache; yfinance hata verirse 3 deneme,
+    o da olmazsa disk/RAM'deki ESKI veriye dusulur (HISTORY_META'da isaretlenir).
+    """
+    symbol = symbol.upper()
+    key = (symbol, period)
+    now = time.time()
+    hit = _HISTORY_CACHE.get(key)
+
+    if hit and now - hit[0] < HISTORY_CACHE_TTL_SECONDS:
+        return hit[1].copy()
+
+    last_exc = None
+    for attempt in range(HISTORY_RETRIES):
+        try:
+            df = _download_history_yf(symbol, period)
+            _HISTORY_CACHE[key] = (now, df)
+            HISTORY_META[key] = {"stale": False, "fetched_utc": utc_now()}
+            try:
+                df.to_pickle(_history_disk_path(symbol, period))
+            except Exception:
+                pass
+            return df.copy()
+        except Exception as exc:
+            last_exc = exc
+            time.sleep(1.5 * (attempt + 1))
+
+    if hit:
+        HISTORY_META[key] = {"stale": True, "fetched_utc": HISTORY_META.get(key, {}).get("fetched_utc"), "error": str(last_exc)}
+        return hit[1].copy()
+    try:
+        df = pd.read_pickle(_history_disk_path(symbol, period))
+        _HISTORY_CACHE[key] = (now - HISTORY_CACHE_TTL_SECONDS + 600, df)
+        HISTORY_META[key] = {"stale": True, "fetched_utc": None, "error": str(last_exc)}
+        return df.copy()
+    except Exception:
+        pass
+    raise last_exc
 
 
 # ============================================================
@@ -20457,6 +20525,7 @@ def run_simple_commodity_momentum(
     years=10,
     top_n=2,
     transaction_cost_pct=0.10,
+    rebalance="daily",
 ):
 
     (
@@ -20518,6 +20587,16 @@ def run_simple_commodity_momentum(
     pending_entries = []
 
     previous_close_prices = {}
+
+    def _is_decision_day(idx):
+        # rebalance="weekly": karar yalniz haftanin SON islem gununde verilir.
+        if rebalance != "weekly":
+            return True
+        if idx >= len(common_dates) - 1:
+            return True
+        a = pd.Timestamp(common_dates[idx]).isocalendar()
+        b = pd.Timestamp(common_dates[idx + 1]).isocalendar()
+        return (a[0], a[1]) != (b[0], b[1])
 
     for i, date in enumerate(
         common_dates
@@ -20796,6 +20875,9 @@ def run_simple_commodity_momentum(
             break
 
         # ====================================================
+        if not _is_decision_day(i):
+            continue
+
         # 3) TODAY CLOSE -> EXIT SIGNALS
         # ====================================================
 
@@ -21633,6 +21715,10 @@ def simple_momentum_endpoint(
         ge=3,
         le=15,
     ),
+    rebalance: str = Query(
+        default="daily",
+        pattern="^(daily|weekly)$",
+    ),
 ):
 
     try:
@@ -21642,6 +21728,7 @@ def simple_momentum_endpoint(
                 years=years,
                 top_n=2,
                 transaction_cost_pct=0.10,
+                rebalance=rebalance,
             )
         )
 
@@ -21651,3 +21738,438 @@ def simple_momentum_endpoint(
             status_code=400,
             detail=str(exc),
         )
+
+
+# ============================================================
+# HAFTALIK BULTEN: SIMPLE-COMMODITY-MOMENTUM-V1 kurallariyla
+# - Karar yalniz TAMAMLANMIS gunluk mumlarla, haftanin son islem gunu
+# - Sticky: tutulan, uygunlugu bozulana kadar tutulur; bos slotlar siralamayla dolar
+# - Islem: sonraki acilis. Model portfoy durumu kalici saklanir (Postgres ya da dosya)
+# - Koruma seviyesi (ATR stop) SADECE tavsiyedir, backtest'te yoktur.
+# ============================================================
+BULLETIN_TOP_N = 2
+BULLETIN_PERIOD = "5y"
+ATR_STOP_MULT = float(os.getenv("ATR_STOP_MULT", "2.5"))
+BULLETIN_HOUR_UTC = float(os.getenv("BULLETIN_HOUR_UTC", "22.5"))  # 22:30 UTC, ABD kapanisindan sonra
+STALE_BAR_MAX_DAYS = 4
+ADMIN_KEY = os.getenv("ADMIN_KEY", "").strip()
+TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+BULLETIN_LOCK = threading.Lock()
+BULLETIN_STATE_FILE = os.path.join(BULLETIN_DATA_DIR, "commodity_weekly_state.json")
+BULLETIN_SCHED = {"last_tick_utc": None, "last_result": None, "task": None}
+
+
+def _check_admin(key):
+    if ADMIN_KEY and key != ADMIN_KEY:
+        raise HTTPException(status_code=403, detail="Yetkisiz: key gerekli.")
+
+
+# ---------------- state ----------------
+def _empty_state():
+    return {"holdings": {}, "last_asof": None, "last_sent_utc": None, "history": []}
+
+
+def _state_backend():
+    return "POSTGRESQL" if DATABASE_URL else "FILE_EPHEMERAL"
+
+
+def bulletin_load_state():
+    if DATABASE_URL:
+        import psycopg
+        with psycopg.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS commodity_weekly_state (
+                        id INTEGER PRIMARY KEY,
+                        payload JSONB NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )""")
+                cur.execute("SELECT payload FROM commodity_weekly_state WHERE id = 1")
+                row = cur.fetchone()
+            conn.commit()
+        if not row:
+            return _empty_state()
+        payload = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        return {**_empty_state(), **payload}
+    try:
+        with open(BULLETIN_STATE_FILE, "r", encoding="utf-8") as f:
+            return {**_empty_state(), **json.load(f)}
+    except Exception:
+        return _empty_state()
+
+
+def bulletin_save_state(state):
+    state["history"] = state.get("history", [])[-30:]
+    if DATABASE_URL:
+        import psycopg
+        payload = json.dumps(state)
+        with psycopg.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO commodity_weekly_state (id, payload, updated_at)
+                    VALUES (1, %s::jsonb, NOW())
+                    ON CONFLICT (id) DO UPDATE
+                    SET payload = EXCLUDED.payload, updated_at = NOW()
+                """, (payload,))
+            conn.commit()
+        return
+    with open(BULLETIN_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+
+
+# ---------------- data / signal ----------------
+def bulletin_drop_incomplete_bar(df, now_utc):
+    """Bugunun mumu ABD kapanisindan once yarimdir -> at."""
+    if len(df) == 0:
+        return df
+    last_date = pd.Timestamp(df.index[-1]).date()
+    hour = now_utc.hour + now_utc.minute / 60.0
+    if last_date == now_utc.date() and hour < 22.0:
+        return df.iloc[:-1]
+    return df
+
+
+def bulletin_build_frames(period=BULLETIN_PERIOD):
+    frames, errors = {}, []
+    now_utc = datetime.now(timezone.utc)
+    for symbol in ASSETS:
+        try:
+            df = download_history(symbol, period)
+            df = bulletin_drop_incomplete_bar(df, now_utc)
+            df = calculate_indicators(df)
+            df["MOM6M"] = df["Close"].pct_change(126) * 100
+            df["MOM12M"] = df["Close"].pct_change(252) * 100
+            df["RANK_SCORE"] = (df["MOM6M"] + df["MOM12M"]) / 2
+            df = df.dropna()
+            if df.empty:
+                raise ValueError("gösterge üretilemedi")
+            frames[symbol] = df
+        except Exception as exc:
+            errors.append({"symbol": symbol, "error": str(exc)})
+    return frames, errors
+
+
+def _eligible(row):
+    return bool(
+        row["Close"] > row["EMA200"]
+        and row["EMA50"] > row["EMA200"]
+        and row["MOM6M"] > 0
+        and row["MOM12M"] > 0
+    )
+
+
+def bulletin_decide(frames, errors, prev_holdings, top_n=BULLETIN_TOP_N):
+    """Saf karar fonksiyonu: state'i DEGISTIRMEZ."""
+    last_dates = {sym: pd.Timestamp(df.index[-1]).date() for sym, df in frames.items()}
+    if not last_dates:
+        raise ValueError("Hiçbir varlık için veri alınamadı.")
+    as_of = max(last_dates.values())
+
+    usable, stale = {}, []
+    for sym, df in frames.items():
+        if (as_of - last_dates[sym]).days > STALE_BAR_MAX_DAYS:
+            stale.append(sym)
+        else:
+            usable[sym] = df.iloc[-1]
+
+    info = {}
+    for sym, row in usable.items():
+        atr = float(row["ATR14"])
+        close = float(row["Close"])
+        stop = close - ATR_STOP_MULT * atr
+        info[sym] = {
+            "symbol": sym,
+            "name": ASSETS[sym]["tr_name"],
+            "group": ASSETS[sym]["group"],
+            "close": round(close, 2),
+            "eligible": _eligible(row),
+            "mom6_pct": round(float(row["MOM6M"]), 1),
+            "mom12_pct": round(float(row["MOM12M"]), 1),
+            "rank_score": round(float(row["RANK_SCORE"]), 2),
+            "dist_ema200_pct": round(float(row["DIST_EMA200"]), 1),
+            "atr_pct": round(float(row["ATR_PCT"]), 2),
+            "stop_level": round(stop, 2),
+            "stop_distance_pct": round((close - stop) / close * 100, 1) if close > 0 else None,
+        }
+
+    prev = [s_ for s_ in prev_holdings if s_ in ASSETS]
+    exits, survivors, unknown = [], [], []
+    for sym in prev:
+        if sym not in info:
+            unknown.append(sym)       # veri yok/eski: karar verme, uyar
+            survivors.append(sym)
+        elif not info[sym]["eligible"]:
+            exits.append(sym)
+        else:
+            survivors.append(sym)
+
+    free_slots = max(0, top_n - len(survivors))
+    candidates = [
+        v for sym, v in info.items()
+        if v["eligible"] and sym not in survivors and sym not in exits
+    ]
+    candidates.sort(key=lambda x: (x["rank_score"], x["mom12_pct"], x["mom6_pct"]), reverse=True)
+    entries = [c["symbol"] for c in candidates[:free_slots]]
+
+    target = survivors + entries
+    ranking = sorted(
+        [v for v in info.values() if v["eligible"]],
+        key=lambda x: (x["rank_score"], x["mom12_pct"], x["mom6_pct"]),
+        reverse=True,
+    )
+    return {
+        "as_of": as_of.isoformat(),
+        "entries": entries,
+        "exits": exits,
+        "holds": [s_ for s_ in survivors if s_ not in unknown],
+        "unknown_data": unknown,
+        "target": target,
+        "cash_slots": max(0, top_n - len(target)),
+        "ranking_eligible": ranking,
+        "info": info,
+        "stale_symbols": stale,
+        "data_errors": errors,
+        "top_n": top_n,
+    }
+
+
+def bulletin_format(decision, holdings_state):
+    d = decision
+    info = d["info"]
+    w = 100.0 / d["top_n"]
+    L = [
+        "EMTIA HAFTALIK BULTEN (model portfoy)",
+        f"Veri tarihi: {d['as_of']} kapanisi | Islem: sonraki acilis (pazartesi)",
+        "",
+    ]
+
+    def pos_line(sym):
+        v = info[sym]
+        risk = (v["stop_distance_pct"] or 0) * w / 100.0
+        return (
+            f"- {sym} {v['name']} | kapanis {v['close']} | 6a {v['mom6_pct']:+.1f}% 12a {v['mom12_pct']:+.1f}%\n"
+            f"  koruma seviyesi {v['stop_level']} (-%{v['stop_distance_pct']}) | agirlik %{w:.0f} | "
+            f"bu seviyede portfoy kaybi ~%{risk:.1f}"
+        )
+
+    if d["entries"]:
+        L.append("YENI GIRIS:")
+        L += [pos_line(x) for x in d["entries"]]
+        L.append("")
+    if d["exits"]:
+        L.append("CIKIS (trend/momentum bozuldu):")
+        for x in d["exits"]:
+            h = holdings_state.get(x, {})
+            ref = h.get("entry_ref_close")
+            since = ""
+            if ref and x in info:
+                since = f" | giris referansindan beri {(info[x]['close'] / ref - 1) * 100:+.1f}%"
+            L.append(f"- {x} {info[x]['name']} | kapanis {info[x]['close']}{since}")
+        L.append("")
+    if d["holds"]:
+        L.append("TUTULAN (degisiklik yok):")
+        L += [pos_line(x) for x in d["holds"]]
+        L.append("")
+    if d["unknown_data"]:
+        L.append("DIKKAT: su pozisyonlar icin guncel veri yok, kontrol et: " + ", ".join(d["unknown_data"]))
+        L.append("")
+    if d["cash_slots"]:
+        L.append(f"NAKITTE: {d['cash_slots']} slot (uygun aday yok ya da bos)")
+        L.append("")
+    if not (d["entries"] or d["exits"]):
+        L.append("Bu hafta degisiklik yok.")
+        L.append("")
+    rk = d["ranking_eligible"][:5]
+    if rk:
+        L.append("Uygun siralama: " + " > ".join(f"{x['symbol']} ({x['rank_score']:+.1f})" for x in rk))
+    if d["stale_symbols"] or d["data_errors"]:
+        bad = d["stale_symbols"] + [x["symbol"] for x in d["data_errors"]]
+        L.append("Veri sorunu (hesaba katilmadi): " + ", ".join(bad))
+    L.append("")
+    L.append("Not: Trend takibi, tahmin degildir. Koruma seviyesi backtest'te yoktur; sadece risk referansidir.")
+    return "\n".join(L)
+
+
+def bulletin_commit(state, decision):
+    """Model portfoyu bulten sonrasi durumuna getirir."""
+    new_holdings = {}
+    for sym in decision["target"]:
+        if sym in state["holdings"]:
+            new_holdings[sym] = state["holdings"][sym]
+        else:
+            new_holdings[sym] = {
+                "entry_asof": decision["as_of"],
+                "entry_ref_close": decision["info"][sym]["close"],
+            }
+    state["holdings"] = new_holdings
+    state["last_asof"] = decision["as_of"]
+    state["last_sent_utc"] = utc_now()
+    state.setdefault("history", []).append({
+        "as_of": decision["as_of"],
+        "entries": decision["entries"],
+        "exits": decision["exits"],
+        "target": decision["target"],
+    })
+    return state
+
+
+def bulletin_telegram_send(text):
+    if not TG_TOKEN or not TG_CHAT_ID:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID tanimli degil.")
+    import requests
+    r = requests.post(
+        f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+        json={"chat_id": TG_CHAT_ID, "text": text[:4000], "disable_web_page_preview": True},
+        timeout=20,
+    )
+    r.raise_for_status()
+    return True
+
+
+def bulletin_run(send=False, force=False):
+    """
+    send=False: onizleme (state degismez, mesaj gitmez).
+    send=True : karar + Telegram + state kaydi (state YALNIZ mesaj gittiyse kaydedilir).
+    """
+    with BULLETIN_LOCK:
+        state = bulletin_load_state()
+        frames, errors = bulletin_build_frames()
+        decision = bulletin_decide(frames, errors, list(state["holdings"].keys()))
+        text = bulletin_format(decision, state["holdings"])
+        stale_sources = [k[0] for k, v in HISTORY_META.items() if v.get("stale")]
+        if stale_sources:
+            text += "\nUyari: eski onbellek verisi kullanildi: " + ", ".join(sorted(set(stale_sources)))
+
+        out = {
+            "status": "OK",
+            "mode": "LONG_ONLY_MANUAL_EXECUTION",
+            "send": send,
+            "state_backend": _state_backend(),
+            "last_asof_in_state": state["last_asof"],
+            "decision": {k: v for k, v in decision.items() if k != "info"},
+            "positions_info": {s_: decision["info"][s_] for s_ in decision["target"] + decision["exits"] if s_ in decision["info"]},
+            "message": text,
+            "generated_utc": utc_now(),
+        }
+        if not send:
+            return out
+
+        if state["last_asof"] and decision["as_of"] <= state["last_asof"] and not force:
+            out["status"] = "SKIPPED_ALREADY_SENT"
+            return out
+
+        bulletin_telegram_send(text)          # hata verirse state kaydedilmez
+        state = bulletin_commit(state, decision)
+        bulletin_save_state(state)
+        out["status"] = "SENT"
+        out["new_holdings"] = list(state["holdings"].keys())
+        return out
+
+
+def bulletin_week_ok(as_of_iso, now_utc):
+    """Zamanlayici: bu haftanin (persembe/cuma) tamamlanmis verisi mi?"""
+    as_of = datetime.fromisoformat(as_of_iso).date()
+    return (
+        as_of.isocalendar()[:2] == now_utc.date().isocalendar()[:2]
+        and as_of.weekday() >= 3
+    )
+
+
+def bulletin_scheduler_tick():
+    now_utc = datetime.now(timezone.utc)
+    hour = now_utc.hour + now_utc.minute / 60.0
+    if now_utc.weekday() < 4 or (now_utc.weekday() == 4 and hour < BULLETIN_HOUR_UTC):
+        return {"status": "WAITING_FOR_FRIDAY_CLOSE"}
+    preview = bulletin_run(send=False)
+    state_asof = preview["last_asof_in_state"]
+    as_of = preview["decision"]["as_of"]
+    if state_asof and as_of <= state_asof:
+        return {"status": "ALREADY_SENT_THIS_WEEK", "as_of": as_of}
+    if not bulletin_week_ok(as_of, now_utc):
+        return {"status": "DATA_NOT_READY", "as_of": as_of}
+    return bulletin_run(send=True)
+
+
+async def bulletin_scheduler_loop():
+    await asyncio.sleep(60)
+    while True:
+        try:
+            res = await asyncio.to_thread(bulletin_scheduler_tick)
+            BULLETIN_SCHED["last_result"] = {k: v for k, v in res.items() if k not in ("message", "positions_info", "decision")}
+        except Exception as exc:
+            BULLETIN_SCHED["last_result"] = {"status": "ERROR", "error": str(exc)}
+        BULLETIN_SCHED["last_tick_utc"] = utc_now()
+        await asyncio.sleep(1800)
+
+
+@app.on_event("startup")
+async def bulletin_startup():
+    if BULLETIN_SCHED["task"] is None:
+        BULLETIN_SCHED["task"] = asyncio.create_task(bulletin_scheduler_loop())
+
+
+# ---------------- endpoints ----------------
+@app.get("/weekly-bulletin")
+def weekly_bulletin_preview():
+    """Onizleme: mesaj gonderilmez, state degismez."""
+    try:
+        return bulletin_run(send=False)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/weekly-bulletin-send")
+def weekly_bulletin_send(key: str = "", force: bool = False):
+    _check_admin(key)
+    try:
+        return bulletin_run(send=True, force=force)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/weekly-bulletin-state")
+def weekly_bulletin_state():
+    state = bulletin_load_state()
+    return {
+        "status": "OK",
+        "state_backend": _state_backend(),
+        "persistent": bool(DATABASE_URL),
+        "telegram_configured": bool(TG_TOKEN and TG_CHAT_ID),
+        "admin_key_required": bool(ADMIN_KEY),
+        "scheduler": {k: v for k, v in BULLETIN_SCHED.items() if k != "task"},
+        "settings": {"top_n": BULLETIN_TOP_N, "atr_stop_mult": ATR_STOP_MULT, "bulletin_hour_utc": BULLETIN_HOUR_UTC},
+        "state": state,
+        "history_cache": {f"{k[0]}:{k[1]}": v for k, v in HISTORY_META.items()},
+    }
+
+
+@app.get("/weekly-set-holdings")
+def weekly_set_holdings(symbols: str = "", key: str = ""):
+    """Gercekte tuttuklarin modelden farkliysa durumu elle esitle. Ornek: ?symbols=GLD,SLV  (bos = nakit)"""
+    _check_admin(key)
+    wanted = [x.strip().upper() for x in symbols.split(",") if x.strip()]
+    bad = [x for x in wanted if x not in ASSETS]
+    if bad:
+        raise HTTPException(status_code=400, detail=f"Listede olmayan sembol: {bad}")
+    if len(wanted) > BULLETIN_TOP_N:
+        raise HTTPException(status_code=400, detail=f"En fazla {BULLETIN_TOP_N} pozisyon.")
+    with BULLETIN_LOCK:
+        state = bulletin_load_state()
+        old = state["holdings"]
+        state["holdings"] = {
+            x: old.get(x, {"entry_asof": None, "entry_ref_close": None}) for x in wanted
+        }
+        bulletin_save_state(state)
+    return {"status": "OK", "holdings": list(state["holdings"].keys())}
+
+
+@app.get("/telegram-test")
+def telegram_test(key: str = ""):
+    _check_admin(key)
+    try:
+        bulletin_telegram_send("Emtia botu: Telegram baglantisi calisiyor.")
+        return {"status": "OK", "sent": True}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
