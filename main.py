@@ -16752,3 +16752,1589 @@ def v13_2021_vs_2023_diagnostic_endpoint():
                 exc
             ),
         )
+
+# ============================================================
+# V1.3 LONG-TERM TREND MATURITY QUARTILE DIAGNOSTIC
+# ============================================================
+#
+# PURPOSE
+# -------
+# Test whether stronger LONG-TERM TREND MATURITY at entry
+# is associated with better V1.3 outcomes.
+#
+# FROZEN STRATEGY:
+# - V1.3 CONFIRM3
+# - Top2 equal weight
+# - Sticky rotation
+# - Entry score >= 75
+# - Exit score <= 50 / frozen slow exit
+# - 3 consecutive AL_ADAYI closes
+# - Signal at close
+# - Execution next open
+# - Cost 0.10% each side
+#
+# DIAGNOSTIC ONLY:
+# - NO new trading filter
+# - NO optimization
+# - NO threshold search
+# - NO asset exclusion
+#
+# PRIMARY FEATURES:
+#
+#   1) MOM120
+#   2) EMA50 vs EMA200 spread
+#
+# Each feature is divided into GLOBAL ENTRY QUARTILES:
+#
+#   Q1 = weakest
+#   Q2
+#   Q3
+#   Q4 = strongest
+#
+# We then calculate:
+#
+# - trade count
+# - winner count
+# - loser count
+# - win rate
+# - profit factor
+# - average trade return
+# - median trade return
+# - average holding days
+#
+# Diagnostic forward returns:
+#
+# - 5d
+# - 10d
+# - 20d
+# - 40d
+#
+# IMPORTANT:
+# Quartile boundaries are DESCRIPTIVE.
+# They must NOT be converted directly into strategy thresholds.
+#
+# ============================================================
+
+
+def v13_maturity_float(
+    value,
+    digits=4,
+):
+
+    try:
+
+        if value is None:
+            return None
+
+        if pd.isna(value):
+            return None
+
+        value = float(value)
+
+        if (
+            math.isnan(value)
+            or
+            math.isinf(value)
+        ):
+            return None
+
+        return round(
+            value,
+            digits,
+        )
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# FORWARD RETURN FROM ACTUAL ENTRY OPEN
+# ============================================================
+
+def v13_maturity_forward_return(
+    df,
+    entry_date,
+    horizon,
+):
+
+    try:
+
+        entry_date = pd.Timestamp(
+            entry_date
+        )
+
+        if entry_date not in df.index:
+            return None
+
+        location = df.index.get_loc(
+            entry_date
+        )
+
+        if not isinstance(
+            location,
+            (
+                int,
+                np.integer,
+            ),
+        ):
+            return None
+
+        target_location = (
+            int(location)
+            +
+            int(horizon)
+        )
+
+        if target_location >= len(df):
+            return None
+
+        entry_open = float(
+            df.iloc[
+                int(location)
+            ]["Open"]
+        )
+
+        target_close = float(
+            df.iloc[
+                target_location
+            ]["Close"]
+        )
+
+        if entry_open <= 0:
+            return None
+
+        return (
+            (
+                target_close
+                /
+                entry_open
+                -
+                1
+            )
+            *
+            100
+        )
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# ENTRY SNAPSHOT
+# ============================================================
+
+def v13_maturity_entry_snapshot(
+    prepared,
+    symbol,
+    entry_date,
+):
+
+    if symbol not in prepared:
+        return None
+
+    df = prepared[symbol]
+
+    entry_date = pd.Timestamp(
+        entry_date
+    )
+
+    if entry_date not in df.index:
+        return None
+
+    # --------------------------------------------------------
+    # Execution happens at next OPEN.
+    #
+    # Features therefore come from the immediately preceding
+    # CLOSE.
+    # --------------------------------------------------------
+
+    previous_dates = df.index[
+        df.index < entry_date
+    ]
+
+    if len(previous_dates) == 0:
+        return None
+
+    signal_date = previous_dates[-1]
+
+    row = df.loc[
+        signal_date
+    ]
+
+    try:
+
+        ema50 = float(
+            row["EMA50"]
+        )
+
+        ema200 = float(
+            row["EMA200"]
+        )
+
+        if ema200 == 0:
+            ema50_vs_ema200 = None
+
+        else:
+
+            ema50_vs_ema200 = (
+                (
+                    ema50
+                    /
+                    ema200
+                    -
+                    1
+                )
+                *
+                100
+            )
+
+    except Exception:
+
+        ema50_vs_ema200 = None
+
+    return {
+
+        "symbol":
+            symbol,
+
+        "signal_date":
+            str(
+                pd.Timestamp(
+                    signal_date
+                ).date()
+            ),
+
+        "entry_date":
+            str(
+                entry_date.date()
+            ),
+
+        "entry_year":
+            int(
+                entry_date.year
+            ),
+
+        "score":
+            v13_maturity_float(
+                row.get(
+                    "SCORE"
+                ),
+                2,
+            ),
+
+        "mom20_pct":
+            v13_maturity_float(
+                row.get(
+                    "MOM20"
+                )
+            ),
+
+        "mom60_pct":
+            v13_maturity_float(
+                row.get(
+                    "MOM60"
+                )
+            ),
+
+        "mom120_pct":
+            v13_maturity_float(
+                row.get(
+                    "MOM120"
+                )
+            ),
+
+        "ema50_vs_ema200_pct":
+            v13_maturity_float(
+                ema50_vs_ema200
+            ),
+
+        "rsi14":
+            v13_maturity_float(
+                row.get(
+                    "RSI14"
+                )
+            ),
+
+        "atr_pct":
+            v13_maturity_float(
+                row.get(
+                    "ATR_PCT"
+                )
+            ),
+
+        "drawdown_252_pct":
+            v13_maturity_float(
+                row.get(
+                    "DRAWDOWN_252"
+                )
+            ),
+
+        "forward_5d_pct":
+            v13_maturity_float(
+                v13_maturity_forward_return(
+                    df,
+                    entry_date,
+                    5,
+                )
+            ),
+
+        "forward_10d_pct":
+            v13_maturity_float(
+                v13_maturity_forward_return(
+                    df,
+                    entry_date,
+                    10,
+                )
+            ),
+
+        "forward_20d_pct":
+            v13_maturity_float(
+                v13_maturity_forward_return(
+                    df,
+                    entry_date,
+                    20,
+                )
+            ),
+
+        "forward_40d_pct":
+            v13_maturity_float(
+                v13_maturity_forward_return(
+                    df,
+                    entry_date,
+                    40,
+                )
+            ),
+    }
+
+
+# ============================================================
+# ATTACH ACTUAL TRADE RESULTS
+# ============================================================
+
+def v13_maturity_attach_trades(
+    entries,
+    trades,
+):
+
+    trade_lookup = {}
+
+    for trade in trades:
+
+        symbol = trade.get(
+            "symbol"
+        )
+
+        entry_date = trade.get(
+            "entry_date"
+        )
+
+        if (
+            not symbol
+            or
+            not entry_date
+        ):
+            continue
+
+        key = (
+            str(symbol),
+            str(
+                pd.Timestamp(
+                    entry_date
+                ).date()
+            ),
+        )
+
+        trade_lookup[key] = trade
+
+    output = []
+
+    for entry in entries:
+
+        item = dict(entry)
+
+        key = (
+            str(
+                item["symbol"]
+            ),
+            str(
+                pd.Timestamp(
+                    item["entry_date"]
+                ).date()
+            ),
+        )
+
+        trade = trade_lookup.get(
+            key
+        )
+
+        if trade is None:
+
+            item[
+                "actual_trade_return_pct"
+            ] = None
+
+            item[
+                "actual_trade_exit_date"
+            ] = None
+
+            item[
+                "actual_holding_days"
+            ] = None
+
+            item[
+                "actual_trade_outcome"
+            ] = None
+
+        else:
+
+            trade_return = trade.get(
+                "return_pct"
+            )
+
+            item[
+                "actual_trade_return_pct"
+            ] = (
+                v13_maturity_float(
+                    trade_return,
+                    2,
+                )
+                if trade_return is not None
+                else None
+            )
+
+            item[
+                "actual_trade_exit_date"
+            ] = trade.get(
+                "exit_date"
+            )
+
+            item[
+                "actual_holding_days"
+            ] = trade.get(
+                "holding_days"
+            )
+
+            if trade_return is None:
+
+                outcome = None
+
+            elif float(
+                trade_return
+            ) > 0:
+
+                outcome = "WINNER"
+
+            else:
+
+                outcome = "LOSER"
+
+            item[
+                "actual_trade_outcome"
+            ] = outcome
+
+        output.append(
+            item
+        )
+
+    return output
+
+
+# ============================================================
+# QUARTILE ASSIGNMENT
+# ============================================================
+
+def v13_maturity_assign_quartiles(
+    entries,
+    field,
+):
+
+    valid_entries = [
+
+        item
+
+        for item in entries
+
+        if item.get(
+            field
+        ) is not None
+    ]
+
+    if len(valid_entries) < 8:
+
+        raise ValueError(
+            f"{field}: quartile analizi için yeterli veri yok."
+        )
+
+    values = np.array(
+        [
+            float(
+                item[field]
+            )
+            for item in valid_entries
+        ],
+        dtype=float,
+    )
+
+    q25 = float(
+        np.percentile(
+            values,
+            25,
+        )
+    )
+
+    q50 = float(
+        np.percentile(
+            values,
+            50,
+        )
+    )
+
+    q75 = float(
+        np.percentile(
+            values,
+            75,
+        )
+    )
+
+    output = []
+
+    for item in valid_entries:
+
+        value = float(
+            item[field]
+        )
+
+        if value <= q25:
+
+            quartile = "Q1"
+
+        elif value <= q50:
+
+            quartile = "Q2"
+
+        elif value <= q75:
+
+            quartile = "Q3"
+
+        else:
+
+            quartile = "Q4"
+
+        row = dict(item)
+
+        row[
+            "quartile"
+        ] = quartile
+
+        output.append(
+            row
+        )
+
+    return {
+
+        "field":
+            field,
+
+        "quartile_boundaries": {
+
+            "q25":
+                v13_maturity_float(
+                    q25
+                ),
+
+            "q50":
+                v13_maturity_float(
+                    q50
+                ),
+
+            "q75":
+                v13_maturity_float(
+                    q75
+                ),
+        },
+
+        "entries":
+            output,
+    }
+
+
+# ============================================================
+# QUARTILE STATISTICS
+# ============================================================
+
+def v13_maturity_quartile_stats(
+    rows,
+):
+
+    completed = [
+
+        row
+
+        for row in rows
+
+        if row.get(
+            "actual_trade_return_pct"
+        ) is not None
+    ]
+
+    returns = [
+
+        float(
+            row[
+                "actual_trade_return_pct"
+            ]
+        )
+
+        for row in completed
+    ]
+
+    winners = [
+
+        value
+
+        for value in returns
+
+        if value > 0
+    ]
+
+    losers = [
+
+        value
+
+        for value in returns
+
+        if value <= 0
+    ]
+
+    gross_profit = sum(
+        winners
+    )
+
+    gross_loss = abs(
+        sum(
+            losers
+        )
+    )
+
+    if gross_loss > 0:
+
+        profit_factor = (
+            gross_profit
+            /
+            gross_loss
+        )
+
+    elif gross_profit > 0:
+
+        profit_factor = None
+
+    else:
+
+        profit_factor = 0.0
+
+    holding_days = [
+
+        float(
+            row[
+                "actual_holding_days"
+            ]
+        )
+
+        for row in completed
+
+        if row.get(
+            "actual_holding_days"
+        ) is not None
+    ]
+
+    def field_stats(
+        field,
+    ):
+
+        values = [
+
+            float(
+                row[field]
+            )
+
+            for row in rows
+
+            if row.get(
+                field
+            ) is not None
+        ]
+
+        if not values:
+
+            return {
+
+                "count":
+                    0,
+
+                "mean":
+                    None,
+
+                "median":
+                    None,
+
+                "positive_count":
+                    0,
+
+                "positive_rate_pct":
+                    None,
+            }
+
+        positives = [
+
+            value
+
+            for value in values
+
+            if value > 0
+        ]
+
+        return {
+
+            "count":
+                len(values),
+
+            "mean":
+                v13_maturity_float(
+                    np.mean(
+                        values
+                    ),
+                    2,
+                ),
+
+            "median":
+                v13_maturity_float(
+                    np.median(
+                        values
+                    ),
+                    2,
+                ),
+
+            "positive_count":
+                len(
+                    positives
+                ),
+
+            "positive_rate_pct":
+                v13_maturity_float(
+                    (
+                        len(
+                            positives
+                        )
+                        /
+                        len(
+                            values
+                        )
+                        *
+                        100
+                    ),
+                    2,
+                ),
+        }
+
+    win_rate = (
+
+        len(winners)
+        /
+        len(returns)
+        *
+        100
+
+        if returns
+
+        else 0.0
+    )
+
+    return {
+
+        "entry_count":
+            len(rows),
+
+        "completed_trade_count":
+            len(completed),
+
+        "winner_count":
+            len(winners),
+
+        "loser_count":
+            len(losers),
+
+        "win_rate_pct":
+            v13_maturity_float(
+                win_rate,
+                2,
+            ),
+
+        "profit_factor":
+            (
+                v13_maturity_float(
+                    profit_factor,
+                    3,
+                )
+                if profit_factor is not None
+                else None
+            ),
+
+        "average_trade_return_pct":
+            (
+                v13_maturity_float(
+                    np.mean(
+                        returns
+                    ),
+                    2,
+                )
+                if returns
+                else 0.0
+            ),
+
+        "median_trade_return_pct":
+            (
+                v13_maturity_float(
+                    np.median(
+                        returns
+                    ),
+                    2,
+                )
+                if returns
+                else 0.0
+            ),
+
+        "average_holding_days":
+            (
+                v13_maturity_float(
+                    np.mean(
+                        holding_days
+                    ),
+                    1,
+                )
+                if holding_days
+                else None
+            ),
+
+        "forward_5d":
+            field_stats(
+                "forward_5d_pct"
+            ),
+
+        "forward_10d":
+            field_stats(
+                "forward_10d_pct"
+            ),
+
+        "forward_20d":
+            field_stats(
+                "forward_20d_pct"
+            ),
+
+        "forward_40d":
+            field_stats(
+                "forward_40d_pct"
+            ),
+    }
+
+
+# ============================================================
+# BUILD ONE FEATURE QUARTILE REPORT
+# ============================================================
+
+def v13_maturity_feature_report(
+    entries,
+    field,
+):
+
+    assigned = (
+        v13_maturity_assign_quartiles(
+            entries,
+            field,
+        )
+    )
+
+    report = {
+
+        "feature":
+            field,
+
+        "quartile_definition":
+            (
+                "Q1 weakest -> Q4 strongest. "
+                "Boundaries are descriptive only."
+            ),
+
+        "boundaries":
+            assigned[
+                "quartile_boundaries"
+            ],
+
+        "quartiles":
+            {},
+    }
+
+    for quartile in [
+        "Q1",
+        "Q2",
+        "Q3",
+        "Q4",
+    ]:
+
+        rows = [
+
+            item
+
+            for item in assigned[
+                "entries"
+            ]
+
+            if (
+                item[
+                    "quartile"
+                ]
+                ==
+                quartile
+            )
+        ]
+
+        rows = sorted(
+            rows,
+            key=lambda x:
+                x[
+                    "entry_date"
+                ],
+        )
+
+        report[
+            "quartiles"
+        ][
+            quartile
+        ] = {
+
+            "statistics":
+                v13_maturity_quartile_stats(
+                    rows
+                ),
+
+            "entries":
+                rows,
+        }
+
+    return report
+
+
+# ============================================================
+# SIMPLE MONOTONICITY DIAGNOSTIC
+# ============================================================
+
+def v13_maturity_monotonicity(
+    report,
+):
+
+    metrics = [
+
+        "win_rate_pct",
+        "average_trade_return_pct",
+        "median_trade_return_pct",
+    ]
+
+    output = {}
+
+    for metric in metrics:
+
+        values = []
+
+        for quartile in [
+            "Q1",
+            "Q2",
+            "Q3",
+            "Q4",
+        ]:
+
+            value = (
+                report[
+                    "quartiles"
+                ][
+                    quartile
+                ][
+                    "statistics"
+                ].get(
+                    metric
+                )
+            )
+
+            values.append(
+                value
+            )
+
+        valid = all(
+            value is not None
+            for value in values
+        )
+
+        if valid:
+
+            non_decreasing = all(
+
+                float(
+                    values[i]
+                )
+                <=
+                float(
+                    values[i + 1]
+                )
+
+                for i in range(
+                    len(values) - 1
+                )
+            )
+
+        else:
+
+            non_decreasing = False
+
+        output[
+            metric
+        ] = {
+
+            "Q1":
+                values[0],
+
+            "Q2":
+                values[1],
+
+            "Q3":
+                values[2],
+
+            "Q4":
+                values[3],
+
+            "strict_test":
+                (
+                    "non_decreasing"
+                    if non_decreasing
+                    else
+                    "not_monotonic"
+                ),
+        }
+
+    # --------------------------------------------------------
+    # Forward mean-return monotonicity
+    # --------------------------------------------------------
+
+    for horizon in [
+        "forward_5d",
+        "forward_10d",
+        "forward_20d",
+        "forward_40d",
+    ]:
+
+        values = []
+
+        for quartile in [
+            "Q1",
+            "Q2",
+            "Q3",
+            "Q4",
+        ]:
+
+            value = (
+                report[
+                    "quartiles"
+                ][
+                    quartile
+                ][
+                    "statistics"
+                ][
+                    horizon
+                ][
+                    "mean"
+                ]
+            )
+
+            values.append(
+                value
+            )
+
+        valid = all(
+            value is not None
+            for value in values
+        )
+
+        if valid:
+
+            non_decreasing = all(
+
+                float(
+                    values[i]
+                )
+                <=
+                float(
+                    values[i + 1]
+                )
+
+                for i in range(
+                    len(values) - 1
+                )
+            )
+
+        else:
+
+            non_decreasing = False
+
+        output[
+            horizon + "_mean"
+        ] = {
+
+            "Q1":
+                values[0],
+
+            "Q2":
+                values[1],
+
+            "Q3":
+                values[2],
+
+            "Q4":
+                values[3],
+
+            "strict_test":
+                (
+                    "non_decreasing"
+                    if non_decreasing
+                    else
+                    "not_monotonic"
+                ),
+        }
+
+    return output
+
+
+# ============================================================
+# MAIN DIAGNOSTIC
+# ============================================================
+
+def run_v13_trend_maturity_quartiles():
+
+    entry_score = 75
+    exit_score = 50
+    transaction_cost_pct = 0.10
+    confirmation_days = 3
+
+    # --------------------------------------------------------
+    # Same full-history preparation already used by the
+    # yearly and 2021-vs-2023 diagnostics.
+    # --------------------------------------------------------
+
+    (
+        prepared,
+        common_dates,
+        errors,
+    ) = (
+        v13_yearly_prepare_full_history()
+    )
+
+    # --------------------------------------------------------
+    # Same frozen V1.3 CONFIRM3 candidate preparation.
+    # --------------------------------------------------------
+
+    confirmed_prepared = (
+        build_v13_confirmed_prepared(
+
+            prepared=
+                prepared,
+
+            confirmation_days=
+                confirmation_days,
+        )
+    )
+
+    # --------------------------------------------------------
+    # ONE continuous frozen V1.3 Top2 Sticky run.
+    # --------------------------------------------------------
+
+    result = (
+        run_rotation_variant(
+
+            prepared=
+                confirmed_prepared,
+
+            common_dates=
+                common_dates,
+
+            top_n=
+                2,
+
+            entry_score=
+                entry_score,
+
+            exit_score=
+                exit_score,
+
+            transaction_cost_pct=
+                transaction_cost_pct,
+        )
+    )
+
+    # --------------------------------------------------------
+    # Extract ACTUAL portfolio entry events.
+    # --------------------------------------------------------
+
+    entries = []
+
+    seen_entries = set()
+
+    for rebalance in result[
+        "rebalances"
+    ]:
+
+        execution_date = (
+            rebalance.get(
+                "execution_date"
+            )
+        )
+
+        entering = (
+            rebalance.get(
+                "entering",
+                [],
+            )
+        )
+
+        if (
+            not execution_date
+            or
+            not entering
+        ):
+            continue
+
+        execution_ts = pd.Timestamp(
+            execution_date
+        )
+
+        for symbol in entering:
+
+            key = (
+                str(symbol),
+                str(
+                    execution_ts.date()
+                ),
+            )
+
+            if key in seen_entries:
+                continue
+
+            seen_entries.add(
+                key
+            )
+
+            snapshot = (
+                v13_maturity_entry_snapshot(
+
+                    prepared=
+                        confirmed_prepared,
+
+                    symbol=
+                        symbol,
+
+                    entry_date=
+                        execution_ts,
+                )
+            )
+
+            if snapshot is not None:
+
+                entries.append(
+                    snapshot
+                )
+
+    # --------------------------------------------------------
+    # Attach frozen slow-exit trade outcome.
+    # --------------------------------------------------------
+
+    entries = (
+        v13_maturity_attach_trades(
+
+            entries=
+                entries,
+
+            trades=
+                result[
+                    "trades"
+                ],
+        )
+    )
+
+    entries = sorted(
+        entries,
+        key=lambda x:
+            x[
+                "entry_date"
+            ],
+    )
+
+    # --------------------------------------------------------
+    # MOM120 REPORT
+    # --------------------------------------------------------
+
+    mom120_report = (
+        v13_maturity_feature_report(
+
+            entries=
+                entries,
+
+            field=
+                "mom120_pct",
+        )
+    )
+
+    # --------------------------------------------------------
+    # EMA50 / EMA200 SPREAD REPORT
+    # --------------------------------------------------------
+
+    ema50_200_report = (
+        v13_maturity_feature_report(
+
+            entries=
+                entries,
+
+            field=
+                "ema50_vs_ema200_pct",
+        )
+    )
+
+    # --------------------------------------------------------
+    # Monotonicity checks.
+    #
+    # These are descriptive only.
+    # --------------------------------------------------------
+
+    mom120_monotonicity = (
+        v13_maturity_monotonicity(
+            mom120_report
+        )
+    )
+
+    ema50_200_monotonicity = (
+        v13_maturity_monotonicity(
+            ema50_200_report
+        )
+    )
+
+    # --------------------------------------------------------
+    # Overall trade statistics for reference.
+    # --------------------------------------------------------
+
+    overall_stats = (
+        v13_maturity_quartile_stats(
+            entries
+        )
+    )
+
+    # --------------------------------------------------------
+    # Entry distribution by year.
+    # --------------------------------------------------------
+
+    yearly_entry_counts = {}
+
+    for entry in entries:
+
+        year = str(
+            entry[
+                "entry_year"
+            ]
+        )
+
+        yearly_entry_counts[
+            year
+        ] = (
+            yearly_entry_counts.get(
+                year,
+                0,
+            )
+            +
+            1
+        )
+
+    return {
+
+        "test":
+            "V1.3_LONG_TERM_TREND_MATURITY_QUARTILES",
+
+        "model":
+            "V1.3_CONFIRM3",
+
+        "generated_at_utc":
+            utc_now(),
+
+        "methodology": {
+
+            "strategy_modified":
+                False,
+
+            "parameter_optimization":
+                False,
+
+            "new_trading_filter":
+                False,
+
+            "threshold_search":
+                False,
+
+            "asset_exclusion":
+                False,
+
+            "portfolio":
+                "TOP_2_EQUAL_WEIGHT",
+
+            "sticky_rotation":
+                True,
+
+            "entry_score":
+                entry_score,
+
+            "exit_score":
+                exit_score,
+
+            "confirmation_days":
+                confirmation_days,
+
+            "transaction_cost_pct_each_side":
+                transaction_cost_pct,
+
+            "execution":
+                (
+                    "Signal at close, execution "
+                    "at next trading day open"
+                ),
+
+            "features_tested": [
+                "MOM120",
+                "EMA50_vs_EMA200",
+            ],
+
+            "quartile_method":
+                (
+                    "Global quartiles across actual "
+                    "V1.3 entry events"
+                ),
+
+            "quartiles_are_strategy_thresholds":
+                False,
+
+            "forward_returns_used_for_trading":
+                False,
+
+            "continuous_portfolio":
+                True,
+
+            "long_only":
+                True,
+
+            "leverage":
+                False,
+
+            "automatic_orders":
+                False,
+        },
+
+        "period": {
+
+            "start":
+                str(
+                    pd.Timestamp(
+                        common_dates[0]
+                    ).date()
+                ),
+
+            "end":
+                str(
+                    pd.Timestamp(
+                        common_dates[-1]
+                    ).date()
+                ),
+
+            "common_trading_days":
+                len(
+                    common_dates
+                ),
+
+            "actual_entry_count":
+                len(
+                    entries
+                ),
+        },
+
+        "full_run_reference": {
+
+            "performance":
+                result[
+                    "performance"
+                ],
+
+            "yearly_entry_counts":
+                yearly_entry_counts,
+        },
+
+        "overall_entry_statistics":
+            overall_stats,
+
+        "mom120_quartiles":
+            mom120_report,
+
+        "mom120_monotonicity":
+            mom120_monotonicity,
+
+        "ema50_vs_ema200_quartiles":
+            ema50_200_report,
+
+        "ema50_vs_ema200_monotonicity":
+            ema50_200_monotonicity,
+
+        "data_errors":
+            errors,
+
+        "interpretation_rule":
+            (
+                "We are looking for broad and reasonably "
+                "consistent improvement from Q1 toward Q4. "
+                "A single strong quartile or isolated winner "
+                "must not be treated as evidence for a filter."
+            ),
+
+        "warning":
+            (
+                "DESCRIPTIVE DIAGNOSTIC ONLY. "
+                "Do not convert quartile boundaries into "
+                "entry thresholds without independent validation."
+            ),
+    }
+
+
+# ============================================================
+# API ENDPOINT
+# ============================================================
+
+@app.get(
+    "/v13-trend-maturity-quartiles"
+)
+def v13_trend_maturity_quartiles_endpoint():
+
+    try:
+
+        return (
+            run_v13_trend_maturity_quartiles()
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+
+            status_code=400,
+
+            detail=str(
+                exc
+            ),
+        )
