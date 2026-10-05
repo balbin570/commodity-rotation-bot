@@ -18338,3 +18338,1998 @@ def v13_trend_maturity_quartiles_endpoint():
                 exc
             ),
         )
+
+# ============================================================
+# V1.3 EMA50/EMA200 TIME-STABILITY DIAGNOSTIC
+# ============================================================
+#
+# PURPOSE
+# -------
+# Test whether the EMA50-vs-EMA200 "trend maturity" relationship
+# repeats across independent chronological sub-periods.
+#
+# DIAGNOSTIC ONLY.
+#
+# NO:
+# - strategy modification
+# - new trading filter
+# - threshold optimization
+# - asset exclusion
+# - parameter search
+#
+# FROZEN V1.3:
+# - Top2 equal weight
+# - Sticky rotation
+# - Entry score >= 75
+# - Exit score <= 50 / frozen slow exit
+# - 3 consecutive AL_ADAYI closes
+# - Signal at close
+# - Execution next open
+# - Cost 0.10% each side
+#
+# PERIODS ARE PRE-SPECIFIED:
+#
+# 2012-2016
+# 2017-2020
+# 2021-2023
+# 2024-2026
+#
+# IMPORTANT:
+#
+# Quartiles are calculated SEPARATELY inside each period.
+#
+# Therefore the old global quartile thresholds:
+#
+# 1.0919 / 2.2617 / 4.2483
+#
+# ARE NOT USED as trading thresholds.
+#
+# PRE-SPECIFIED VALIDATION CRITERIA:
+#
+# 1) Q3+Q4 average trade return > Q1+Q2
+#    in at least 3 of 4 periods.
+#
+# 2) Q3+Q4 profit factor > Q1+Q2
+#    in at least 3 of 4 periods.
+#
+# Supporting diagnostics:
+#
+# - median trade return
+# - win rate
+# - 5d forward return
+# - 10d forward return
+# - 20d forward return
+# - 40d forward return
+#
+# ============================================================
+
+
+def v13_ema_time_float(
+    value,
+    digits=4,
+):
+
+    try:
+
+        if value is None:
+            return None
+
+        if pd.isna(value):
+            return None
+
+        value = float(value)
+
+        if (
+            math.isnan(value)
+            or
+            math.isinf(value)
+        ):
+            return None
+
+        return round(
+            value,
+            digits,
+        )
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# FORWARD RETURN
+# ============================================================
+
+def v13_ema_time_forward_return(
+    df,
+    entry_date,
+    horizon,
+):
+
+    try:
+
+        entry_date = pd.Timestamp(
+            entry_date
+        )
+
+        if entry_date not in df.index:
+            return None
+
+        location = df.index.get_loc(
+            entry_date
+        )
+
+        if not isinstance(
+            location,
+            (
+                int,
+                np.integer,
+            ),
+        ):
+            return None
+
+        target_location = (
+            int(location)
+            +
+            int(horizon)
+        )
+
+        if target_location >= len(df):
+            return None
+
+        entry_open = float(
+            df.iloc[
+                int(location)
+            ]["Open"]
+        )
+
+        target_close = float(
+            df.iloc[
+                target_location
+            ]["Close"]
+        )
+
+        if entry_open <= 0:
+            return None
+
+        return (
+            (
+                target_close
+                /
+                entry_open
+                -
+                1
+            )
+            *
+            100
+        )
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# ENTRY SNAPSHOT
+# ============================================================
+
+def v13_ema_time_entry_snapshot(
+    prepared,
+    symbol,
+    entry_date,
+):
+
+    if symbol not in prepared:
+        return None
+
+    df = prepared[
+        symbol
+    ]
+
+    entry_date = pd.Timestamp(
+        entry_date
+    )
+
+    if entry_date not in df.index:
+        return None
+
+    previous_dates = df.index[
+        df.index < entry_date
+    ]
+
+    if len(previous_dates) == 0:
+        return None
+
+    # --------------------------------------------------------
+    # Features come from signal close immediately before
+    # next-open execution.
+    # --------------------------------------------------------
+
+    signal_date = previous_dates[-1]
+
+    row = df.loc[
+        signal_date
+    ]
+
+    try:
+
+        ema50 = float(
+            row["EMA50"]
+        )
+
+        ema200 = float(
+            row["EMA200"]
+        )
+
+        if ema200 == 0:
+
+            ema_spread = None
+
+        else:
+
+            ema_spread = (
+                (
+                    ema50
+                    /
+                    ema200
+                    -
+                    1
+                )
+                *
+                100
+            )
+
+    except Exception:
+
+        ema_spread = None
+
+    return {
+
+        "symbol":
+            symbol,
+
+        "signal_date":
+            str(
+                pd.Timestamp(
+                    signal_date
+                ).date()
+            ),
+
+        "entry_date":
+            str(
+                entry_date.date()
+            ),
+
+        "entry_year":
+            int(
+                entry_date.year
+            ),
+
+        "score":
+            v13_ema_time_float(
+                row.get(
+                    "SCORE"
+                ),
+                2,
+            ),
+
+        "ema50_vs_ema200_pct":
+            v13_ema_time_float(
+                ema_spread
+            ),
+
+        "mom20_pct":
+            v13_ema_time_float(
+                row.get(
+                    "MOM20"
+                )
+            ),
+
+        "mom60_pct":
+            v13_ema_time_float(
+                row.get(
+                    "MOM60"
+                )
+            ),
+
+        "mom120_pct":
+            v13_ema_time_float(
+                row.get(
+                    "MOM120"
+                )
+            ),
+
+        "rsi14":
+            v13_ema_time_float(
+                row.get(
+                    "RSI14"
+                )
+            ),
+
+        "atr_pct":
+            v13_ema_time_float(
+                row.get(
+                    "ATR_PCT"
+                )
+            ),
+
+        "drawdown_252_pct":
+            v13_ema_time_float(
+                row.get(
+                    "DRAWDOWN_252"
+                )
+            ),
+
+        "forward_5d_pct":
+            v13_ema_time_float(
+                v13_ema_time_forward_return(
+                    df,
+                    entry_date,
+                    5,
+                )
+            ),
+
+        "forward_10d_pct":
+            v13_ema_time_float(
+                v13_ema_time_forward_return(
+                    df,
+                    entry_date,
+                    10,
+                )
+            ),
+
+        "forward_20d_pct":
+            v13_ema_time_float(
+                v13_ema_time_forward_return(
+                    df,
+                    entry_date,
+                    20,
+                )
+            ),
+
+        "forward_40d_pct":
+            v13_ema_time_float(
+                v13_ema_time_forward_return(
+                    df,
+                    entry_date,
+                    40,
+                )
+            ),
+    }
+
+
+# ============================================================
+# ATTACH ACTUAL TRADE RESULTS
+# ============================================================
+
+def v13_ema_time_attach_trades(
+    entries,
+    trades,
+):
+
+    trade_lookup = {}
+
+    for trade in trades:
+
+        symbol = trade.get(
+            "symbol"
+        )
+
+        entry_date = trade.get(
+            "entry_date"
+        )
+
+        if (
+            not symbol
+            or
+            not entry_date
+        ):
+            continue
+
+        key = (
+            str(symbol),
+            str(
+                pd.Timestamp(
+                    entry_date
+                ).date()
+            ),
+        )
+
+        trade_lookup[
+            key
+        ] = trade
+
+    output = []
+
+    for entry in entries:
+
+        item = dict(
+            entry
+        )
+
+        key = (
+            str(
+                item["symbol"]
+            ),
+            str(
+                pd.Timestamp(
+                    item["entry_date"]
+                ).date()
+            ),
+        )
+
+        trade = trade_lookup.get(
+            key
+        )
+
+        if trade is None:
+
+            item[
+                "actual_trade_return_pct"
+            ] = None
+
+            item[
+                "actual_trade_exit_date"
+            ] = None
+
+            item[
+                "actual_holding_days"
+            ] = None
+
+            item[
+                "actual_trade_outcome"
+            ] = None
+
+        else:
+
+            trade_return = trade.get(
+                "return_pct"
+            )
+
+            item[
+                "actual_trade_return_pct"
+            ] = (
+                v13_ema_time_float(
+                    trade_return,
+                    2,
+                )
+                if trade_return is not None
+                else None
+            )
+
+            item[
+                "actual_trade_exit_date"
+            ] = trade.get(
+                "exit_date"
+            )
+
+            item[
+                "actual_holding_days"
+            ] = trade.get(
+                "holding_days"
+            )
+
+            if trade_return is None:
+
+                outcome = None
+
+            elif float(
+                trade_return
+            ) > 0:
+
+                outcome = "WINNER"
+
+            else:
+
+                outcome = "LOSER"
+
+            item[
+                "actual_trade_outcome"
+            ] = outcome
+
+        output.append(
+            item
+        )
+
+    return output
+
+
+# ============================================================
+# PERIOD DEFINITIONS
+# ============================================================
+
+def v13_ema_time_periods():
+
+    return [
+
+        {
+            "name":
+                "2012-2016",
+
+            "start_year":
+                2012,
+
+            "end_year":
+                2016,
+        },
+
+        {
+            "name":
+                "2017-2020",
+
+            "start_year":
+                2017,
+
+            "end_year":
+                2020,
+        },
+
+        {
+            "name":
+                "2021-2023",
+
+            "start_year":
+                2021,
+
+            "end_year":
+                2023,
+        },
+
+        {
+            "name":
+                "2024-2026",
+
+            "start_year":
+                2024,
+
+            "end_year":
+                2026,
+        },
+    ]
+
+
+# ============================================================
+# ASSIGN WITHIN-PERIOD QUARTILES
+# ============================================================
+
+def v13_ema_time_assign_quartiles(
+    rows,
+):
+
+    valid_rows = [
+
+        row
+
+        for row in rows
+
+        if row.get(
+            "ema50_vs_ema200_pct"
+        ) is not None
+    ]
+
+    if len(valid_rows) < 8:
+
+        raise ValueError(
+            "Dönem içi quartile analizi için yeterli işlem yok."
+        )
+
+    values = np.array(
+        [
+            float(
+                row[
+                    "ema50_vs_ema200_pct"
+                ]
+            )
+            for row in valid_rows
+        ],
+        dtype=float,
+    )
+
+    q25 = float(
+        np.percentile(
+            values,
+            25,
+        )
+    )
+
+    q50 = float(
+        np.percentile(
+            values,
+            50,
+        )
+    )
+
+    q75 = float(
+        np.percentile(
+            values,
+            75,
+        )
+    )
+
+    output = []
+
+    for row in valid_rows:
+
+        value = float(
+            row[
+                "ema50_vs_ema200_pct"
+            ]
+        )
+
+        if value <= q25:
+
+            quartile = "Q1"
+
+        elif value <= q50:
+
+            quartile = "Q2"
+
+        elif value <= q75:
+
+            quartile = "Q3"
+
+        else:
+
+            quartile = "Q4"
+
+        item = dict(
+            row
+        )
+
+        item[
+            "period_quartile"
+        ] = quartile
+
+        output.append(
+            item
+        )
+
+    return {
+
+        "boundaries": {
+
+            "q25":
+                v13_ema_time_float(
+                    q25
+                ),
+
+            "q50":
+                v13_ema_time_float(
+                    q50
+                ),
+
+            "q75":
+                v13_ema_time_float(
+                    q75
+                ),
+        },
+
+        "rows":
+            output,
+    }
+
+
+# ============================================================
+# STATISTICS
+# ============================================================
+
+def v13_ema_time_stats(
+    rows,
+):
+
+    completed = [
+
+        row
+
+        for row in rows
+
+        if row.get(
+            "actual_trade_return_pct"
+        ) is not None
+    ]
+
+    returns = [
+
+        float(
+            row[
+                "actual_trade_return_pct"
+            ]
+        )
+
+        for row in completed
+    ]
+
+    winners = [
+
+        value
+
+        for value in returns
+
+        if value > 0
+    ]
+
+    losers = [
+
+        value
+
+        for value in returns
+
+        if value <= 0
+    ]
+
+    gross_profit = sum(
+        winners
+    )
+
+    gross_loss = abs(
+        sum(
+            losers
+        )
+    )
+
+    if gross_loss > 0:
+
+        profit_factor = (
+            gross_profit
+            /
+            gross_loss
+        )
+
+    elif gross_profit > 0:
+
+        # No losing trades.
+        profit_factor = None
+
+    else:
+
+        profit_factor = 0.0
+
+    holding_days = [
+
+        float(
+            row[
+                "actual_holding_days"
+            ]
+        )
+
+        for row in completed
+
+        if row.get(
+            "actual_holding_days"
+        ) is not None
+    ]
+
+    def forward_stats(
+        field,
+    ):
+
+        values = [
+
+            float(
+                row[field]
+            )
+
+            for row in rows
+
+            if row.get(
+                field
+            ) is not None
+        ]
+
+        if not values:
+
+            return {
+
+                "count":
+                    0,
+
+                "mean_pct":
+                    None,
+
+                "median_pct":
+                    None,
+
+                "positive_count":
+                    0,
+
+                "positive_rate_pct":
+                    None,
+            }
+
+        positives = [
+
+            value
+
+            for value in values
+
+            if value > 0
+        ]
+
+        return {
+
+            "count":
+                len(values),
+
+            "mean_pct":
+                v13_ema_time_float(
+                    np.mean(
+                        values
+                    ),
+                    2,
+                ),
+
+            "median_pct":
+                v13_ema_time_float(
+                    np.median(
+                        values
+                    ),
+                    2,
+                ),
+
+            "positive_count":
+                len(
+                    positives
+                ),
+
+            "positive_rate_pct":
+                v13_ema_time_float(
+                    (
+                        len(
+                            positives
+                        )
+                        /
+                        len(
+                            values
+                        )
+                        *
+                        100
+                    ),
+                    2,
+                ),
+        }
+
+    return {
+
+        "entry_count":
+            len(rows),
+
+        "completed_trade_count":
+            len(completed),
+
+        "winner_count":
+            len(winners),
+
+        "loser_count":
+            len(losers),
+
+        "win_rate_pct":
+            (
+                v13_ema_time_float(
+                    (
+                        len(
+                            winners
+                        )
+                        /
+                        len(
+                            returns
+                        )
+                        *
+                        100
+                    ),
+                    2,
+                )
+                if returns
+                else 0.0
+            ),
+
+        "profit_factor":
+            (
+                v13_ema_time_float(
+                    profit_factor,
+                    3,
+                )
+                if profit_factor is not None
+                else None
+            ),
+
+        "average_trade_return_pct":
+            (
+                v13_ema_time_float(
+                    np.mean(
+                        returns
+                    ),
+                    2,
+                )
+                if returns
+                else None
+            ),
+
+        "median_trade_return_pct":
+            (
+                v13_ema_time_float(
+                    np.median(
+                        returns
+                    ),
+                    2,
+                )
+                if returns
+                else None
+            ),
+
+        "average_holding_days":
+            (
+                v13_ema_time_float(
+                    np.mean(
+                        holding_days
+                    ),
+                    1,
+                )
+                if holding_days
+                else None
+            ),
+
+        "forward_5d":
+            forward_stats(
+                "forward_5d_pct"
+            ),
+
+        "forward_10d":
+            forward_stats(
+                "forward_10d_pct"
+            ),
+
+        "forward_20d":
+            forward_stats(
+                "forward_20d_pct"
+            ),
+
+        "forward_40d":
+            forward_stats(
+                "forward_40d_pct"
+            ),
+    }
+
+
+# ============================================================
+# COMBINE Q1+Q2 / Q3+Q4
+# ============================================================
+
+def v13_ema_time_group_rows(
+    rows,
+    quartiles,
+):
+
+    return [
+
+        row
+
+        for row in rows
+
+        if row.get(
+            "period_quartile"
+        ) in quartiles
+    ]
+
+
+# ============================================================
+# PROFIT FACTOR COMPARISON HELPER
+# ============================================================
+
+def v13_ema_time_pf_is_better(
+    strong_pf,
+    weak_pf,
+):
+
+    # --------------------------------------------------------
+    # None represents no losing trades when gross profit > 0.
+    # In this diagnostic that is treated as effectively
+    # infinite PF.
+    # --------------------------------------------------------
+
+    if strong_pf is None:
+
+        if weak_pf is None:
+            return False
+
+        return True
+
+    if weak_pf is None:
+        return False
+
+    return (
+        float(strong_pf)
+        >
+        float(weak_pf)
+    )
+
+
+# ============================================================
+# ONE PERIOD REPORT
+# ============================================================
+
+def v13_ema_time_period_report(
+    all_entries,
+    period,
+):
+
+    period_rows = [
+
+        row
+
+        for row in all_entries
+
+        if (
+            int(
+                period[
+                    "start_year"
+                ]
+            )
+            <=
+            int(
+                row[
+                    "entry_year"
+                ]
+            )
+            <=
+            int(
+                period[
+                    "end_year"
+                ]
+            )
+        )
+    ]
+
+    assigned = (
+        v13_ema_time_assign_quartiles(
+            period_rows
+        )
+    )
+
+    rows = assigned[
+        "rows"
+    ]
+
+    quartile_reports = {}
+
+    for quartile in [
+        "Q1",
+        "Q2",
+        "Q3",
+        "Q4",
+    ]:
+
+        quartile_rows = [
+
+            row
+
+            for row in rows
+
+            if (
+                row[
+                    "period_quartile"
+                ]
+                ==
+                quartile
+            )
+        ]
+
+        quartile_reports[
+            quartile
+        ] = {
+
+            "statistics":
+                v13_ema_time_stats(
+                    quartile_rows
+                ),
+
+            "entries":
+                sorted(
+                    quartile_rows,
+                    key=lambda x:
+                        x[
+                            "entry_date"
+                        ],
+                ),
+        }
+
+    weak_rows = (
+        v13_ema_time_group_rows(
+            rows,
+            [
+                "Q1",
+                "Q2",
+            ],
+        )
+    )
+
+    strong_rows = (
+        v13_ema_time_group_rows(
+            rows,
+            [
+                "Q3",
+                "Q4",
+            ],
+        )
+    )
+
+    weak_stats = (
+        v13_ema_time_stats(
+            weak_rows
+        )
+    )
+
+    strong_stats = (
+        v13_ema_time_stats(
+            strong_rows
+        )
+    )
+
+    weak_avg = weak_stats.get(
+        "average_trade_return_pct"
+    )
+
+    strong_avg = strong_stats.get(
+        "average_trade_return_pct"
+    )
+
+    if (
+        weak_avg is not None
+        and
+        strong_avg is not None
+    ):
+
+        avg_trade_pass = (
+            float(
+                strong_avg
+            )
+            >
+            float(
+                weak_avg
+            )
+        )
+
+        avg_trade_difference = (
+            v13_ema_time_float(
+                float(
+                    strong_avg
+                )
+                -
+                float(
+                    weak_avg
+                ),
+                2,
+            )
+        )
+
+    else:
+
+        avg_trade_pass = False
+        avg_trade_difference = None
+
+    pf_pass = (
+        v13_ema_time_pf_is_better(
+
+            strong_stats.get(
+                "profit_factor"
+            ),
+
+            weak_stats.get(
+                "profit_factor"
+            ),
+        )
+    )
+
+    # --------------------------------------------------------
+    # Supporting forward-return comparisons.
+    # --------------------------------------------------------
+
+    forward_comparison = {}
+
+    for horizon in [
+        "forward_5d",
+        "forward_10d",
+        "forward_20d",
+        "forward_40d",
+    ]:
+
+        weak_value = (
+            weak_stats[
+                horizon
+            ][
+                "mean_pct"
+            ]
+        )
+
+        strong_value = (
+            strong_stats[
+                horizon
+            ][
+                "mean_pct"
+            ]
+        )
+
+        if (
+            weak_value is not None
+            and
+            strong_value is not None
+        ):
+
+            difference = (
+                v13_ema_time_float(
+                    float(
+                        strong_value
+                    )
+                    -
+                    float(
+                        weak_value
+                    ),
+                    2,
+                )
+            )
+
+            strong_better = (
+                float(
+                    strong_value
+                )
+                >
+                float(
+                    weak_value
+                )
+            )
+
+        else:
+
+            difference = None
+            strong_better = False
+
+        forward_comparison[
+            horizon
+        ] = {
+
+            "Q1_Q2_mean_pct":
+                weak_value,
+
+            "Q3_Q4_mean_pct":
+                strong_value,
+
+            "difference_pct_points":
+                difference,
+
+            "Q3_Q4_better":
+                strong_better,
+        }
+
+    return {
+
+        "period":
+            period[
+                "name"
+            ],
+
+        "start_year":
+            period[
+                "start_year"
+            ],
+
+        "end_year":
+            period[
+                "end_year"
+            ],
+
+        "entry_count":
+            len(
+                rows
+            ),
+
+        "within_period_quartile_boundaries": {
+
+            "q25":
+                assigned[
+                    "boundaries"
+                ][
+                    "q25"
+                ],
+
+            "q50":
+                assigned[
+                    "boundaries"
+                ][
+                    "q50"
+                ],
+
+            "q75":
+                assigned[
+                    "boundaries"
+                ][
+                    "q75"
+                ],
+
+            "important":
+                (
+                    "Descriptive within-period boundaries only; "
+                    "NOT trading thresholds."
+                ),
+        },
+
+        "quartiles":
+            quartile_reports,
+
+        "Q1_Q2_weak_trend_group": {
+
+            "statistics":
+                weak_stats,
+
+            "entry_count":
+                len(
+                    weak_rows
+                ),
+        },
+
+        "Q3_Q4_strong_trend_group": {
+
+            "statistics":
+                strong_stats,
+
+            "entry_count":
+                len(
+                    strong_rows
+                ),
+        },
+
+        "pre_specified_comparison": {
+
+            "average_trade_return": {
+
+                "Q1_Q2_pct":
+                    weak_avg,
+
+                "Q3_Q4_pct":
+                    strong_avg,
+
+                "difference_pct_points":
+                    avg_trade_difference,
+
+                "Q3_Q4_better":
+                    avg_trade_pass,
+            },
+
+            "profit_factor": {
+
+                "Q1_Q2":
+                    weak_stats.get(
+                        "profit_factor"
+                    ),
+
+                "Q3_Q4":
+                    strong_stats.get(
+                        "profit_factor"
+                    ),
+
+                "Q3_Q4_better":
+                    pf_pass,
+            },
+
+            "median_trade_return": {
+
+                "Q1_Q2_pct":
+                    weak_stats.get(
+                        "median_trade_return_pct"
+                    ),
+
+                "Q3_Q4_pct":
+                    strong_stats.get(
+                        "median_trade_return_pct"
+                    ),
+
+                "Q3_Q4_better":
+                    (
+                        (
+                            weak_stats.get(
+                                "median_trade_return_pct"
+                            )
+                            is not None
+                        )
+                        and
+                        (
+                            strong_stats.get(
+                                "median_trade_return_pct"
+                            )
+                            is not None
+                        )
+                        and
+                        (
+                            float(
+                                strong_stats[
+                                    "median_trade_return_pct"
+                                ]
+                            )
+                            >
+                            float(
+                                weak_stats[
+                                    "median_trade_return_pct"
+                                ]
+                            )
+                        )
+                    ),
+            },
+
+            "forward_returns":
+                forward_comparison,
+        },
+    }
+
+
+# ============================================================
+# MAIN TIME-STABILITY TEST
+# ============================================================
+
+def run_v13_ema_time_stability():
+
+    entry_score = 75
+    exit_score = 50
+    confirmation_days = 3
+    transaction_cost_pct = 0.10
+
+    # --------------------------------------------------------
+    # SAME full-history data preparation.
+    # --------------------------------------------------------
+
+    (
+        prepared,
+        common_dates,
+        errors,
+    ) = (
+        v13_yearly_prepare_full_history()
+    )
+
+    # --------------------------------------------------------
+    # SAME frozen V1.3 CONFIRM3 preparation.
+    # --------------------------------------------------------
+
+    confirmed_prepared = (
+        build_v13_confirmed_prepared(
+
+            prepared=
+                prepared,
+
+            confirmation_days=
+                confirmation_days,
+        )
+    )
+
+    # --------------------------------------------------------
+    # ONE CONTINUOUS V1.3 PORTFOLIO.
+    #
+    # IMPORTANT:
+    # Portfolio is NOT reset at period boundaries.
+    # Periods are used only for diagnostic grouping.
+    # --------------------------------------------------------
+
+    result = (
+        run_rotation_variant(
+
+            prepared=
+                confirmed_prepared,
+
+            common_dates=
+                common_dates,
+
+            top_n=
+                2,
+
+            entry_score=
+                entry_score,
+
+            exit_score=
+                exit_score,
+
+            transaction_cost_pct=
+                transaction_cost_pct,
+        )
+    )
+
+    # --------------------------------------------------------
+    # EXTRACT ACTUAL ENTRY EVENTS.
+    # --------------------------------------------------------
+
+    entries = []
+
+    seen_entries = set()
+
+    for rebalance in result[
+        "rebalances"
+    ]:
+
+        execution_date = rebalance.get(
+            "execution_date"
+        )
+
+        entering = rebalance.get(
+            "entering",
+            [],
+        )
+
+        if (
+            not execution_date
+            or
+            not entering
+        ):
+            continue
+
+        execution_ts = pd.Timestamp(
+            execution_date
+        )
+
+        for symbol in entering:
+
+            key = (
+                str(symbol),
+                str(
+                    execution_ts.date()
+                ),
+            )
+
+            if key in seen_entries:
+                continue
+
+            seen_entries.add(
+                key
+            )
+
+            snapshot = (
+                v13_ema_time_entry_snapshot(
+
+                    prepared=
+                        confirmed_prepared,
+
+                    symbol=
+                        symbol,
+
+                    entry_date=
+                        execution_ts,
+                )
+            )
+
+            if snapshot is not None:
+
+                entries.append(
+                    snapshot
+                )
+
+    # --------------------------------------------------------
+    # ATTACH ACTUAL TRADE RESULTS.
+    # --------------------------------------------------------
+
+    entries = (
+        v13_ema_time_attach_trades(
+
+            entries=
+                entries,
+
+            trades=
+                result[
+                    "trades"
+                ],
+        )
+    )
+
+    entries = sorted(
+        entries,
+        key=lambda x:
+            x[
+                "entry_date"
+            ],
+    )
+
+    # --------------------------------------------------------
+    # PERIOD REPORTS
+    # --------------------------------------------------------
+
+    period_reports = []
+
+    for period in (
+        v13_ema_time_periods()
+    ):
+
+        period_report = (
+            v13_ema_time_period_report(
+
+                all_entries=
+                    entries,
+
+                period=
+                    period,
+            )
+        )
+
+        period_reports.append(
+            period_report
+        )
+
+    # --------------------------------------------------------
+    # PRE-SPECIFIED PASS COUNTS
+    # --------------------------------------------------------
+
+    average_trade_pass_count = sum(
+
+        1
+
+        for report in period_reports
+
+        if (
+            report[
+                "pre_specified_comparison"
+            ][
+                "average_trade_return"
+            ][
+                "Q3_Q4_better"
+            ]
+        )
+    )
+
+    profit_factor_pass_count = sum(
+
+        1
+
+        for report in period_reports
+
+        if (
+            report[
+                "pre_specified_comparison"
+            ][
+                "profit_factor"
+            ][
+                "Q3_Q4_better"
+            ]
+        )
+    )
+
+    median_trade_pass_count = sum(
+
+        1
+
+        for report in period_reports
+
+        if (
+            report[
+                "pre_specified_comparison"
+            ][
+                "median_trade_return"
+            ][
+                "Q3_Q4_better"
+            ]
+        )
+    )
+
+    forward_pass_counts = {}
+
+    for horizon in [
+        "forward_5d",
+        "forward_10d",
+        "forward_20d",
+        "forward_40d",
+    ]:
+
+        forward_pass_counts[
+            horizon
+        ] = sum(
+
+            1
+
+            for report in period_reports
+
+            if (
+                report[
+                    "pre_specified_comparison"
+                ][
+                    "forward_returns"
+                ][
+                    horizon
+                ][
+                    "Q3_Q4_better"
+                ]
+            )
+        )
+
+    # --------------------------------------------------------
+    # PRIMARY VALIDATION DECISION
+    # --------------------------------------------------------
+
+    average_trade_criterion_passed = (
+        average_trade_pass_count
+        >=
+        3
+    )
+
+    profit_factor_criterion_passed = (
+        profit_factor_pass_count
+        >=
+        3
+    )
+
+    primary_validation_passed = (
+        average_trade_criterion_passed
+        and
+        profit_factor_criterion_passed
+    )
+
+    if primary_validation_passed:
+
+        decision = (
+            "PASS_AS_V1_6_CANDIDATE"
+        )
+
+        interpretation = (
+            "EMA50-vs-EMA200 trend maturity reproduced "
+            "the pre-specified average-return and profit-factor "
+            "relationship in at least 3 of 4 chronological periods. "
+            "This supports further independent validation as a "
+            "V1.6 candidate, but does NOT define a trading threshold."
+        )
+
+    else:
+
+        decision = (
+            "FAIL_TIME_STABILITY_VALIDATION"
+        )
+
+        interpretation = (
+            "EMA50-vs-EMA200 trend maturity did not satisfy "
+            "both pre-specified time-stability criteria. "
+            "Do not optimize a threshold from these results."
+        )
+
+    # --------------------------------------------------------
+    # OVERALL REFERENCE
+    # --------------------------------------------------------
+
+    overall_stats = (
+        v13_ema_time_stats(
+            entries
+        )
+    )
+
+    return {
+
+        "test":
+            "V1.3_EMA50_EMA200_TIME_STABILITY",
+
+        "model":
+            "V1.3_CONFIRM3",
+
+        "generated_at_utc":
+            utc_now(),
+
+        "methodology": {
+
+            "strategy_modified":
+                False,
+
+            "parameter_optimization":
+                False,
+
+            "new_trading_filter":
+                False,
+
+            "threshold_search":
+                False,
+
+            "asset_exclusion":
+                False,
+
+            "continuous_portfolio":
+                True,
+
+            "portfolio_reset_at_period_boundaries":
+                False,
+
+            "portfolio":
+                "TOP_2_EQUAL_WEIGHT",
+
+            "sticky_rotation":
+                True,
+
+            "entry_score":
+                entry_score,
+
+            "exit_score":
+                exit_score,
+
+            "confirmation_days":
+                confirmation_days,
+
+            "transaction_cost_pct_each_side":
+                transaction_cost_pct,
+
+            "execution":
+                (
+                    "Signal at close, execution "
+                    "at next trading day open"
+                ),
+
+            "tested_feature":
+                "EMA50_vs_EMA200_pct",
+
+            "periods": [
+                "2012-2016",
+                "2017-2020",
+                "2021-2023",
+                "2024-2026",
+            ],
+
+            "quartile_method":
+                (
+                    "Quartiles recalculated independently "
+                    "inside each chronological period."
+                ),
+
+            "global_old_quartile_thresholds_reused":
+                False,
+
+            "forward_returns_used_for_trading":
+                False,
+
+            "long_only":
+                True,
+
+            "leverage":
+                False,
+
+            "automatic_orders":
+                False,
+        },
+
+        "pre_specified_primary_validation": {
+
+            "criterion_1":
+                (
+                    "Q3+Q4 average trade return must exceed "
+                    "Q1+Q2 in at least 3 of 4 periods."
+                ),
+
+            "criterion_2":
+                (
+                    "Q3+Q4 profit factor must exceed "
+                    "Q1+Q2 in at least 3 of 4 periods."
+                ),
+
+            "required_periods":
+                3,
+
+            "criteria_fixed_before_test":
+                True,
+        },
+
+        "period": {
+
+            "start":
+                str(
+                    pd.Timestamp(
+                        common_dates[0]
+                    ).date()
+                ),
+
+            "end":
+                str(
+                    pd.Timestamp(
+                        common_dates[-1]
+                    ).date()
+                ),
+
+            "common_trading_days":
+                len(
+                    common_dates
+                ),
+
+            "actual_entry_count":
+                len(
+                    entries
+                ),
+        },
+
+        "full_v13_reference": {
+
+            "performance":
+                result[
+                    "performance"
+                ],
+
+            "entry_statistics":
+                overall_stats,
+        },
+
+        "period_reports":
+            period_reports,
+
+        "validation_summary": {
+
+            "average_trade_return": {
+
+                "periods_Q3_Q4_better":
+                    average_trade_pass_count,
+
+                "periods_total":
+                    4,
+
+                "required":
+                    3,
+
+                "criterion_passed":
+                    average_trade_criterion_passed,
+            },
+
+            "profit_factor": {
+
+                "periods_Q3_Q4_better":
+                    profit_factor_pass_count,
+
+                "periods_total":
+                    4,
+
+                "required":
+                    3,
+
+                "criterion_passed":
+                    profit_factor_criterion_passed,
+            },
+
+            "supporting_median_trade_return": {
+
+                "periods_Q3_Q4_better":
+                    median_trade_pass_count,
+
+                "periods_total":
+                    4,
+            },
+
+            "supporting_forward_return_counts":
+                forward_pass_counts,
+
+            "PRIMARY_VALIDATION_PASSED":
+                primary_validation_passed,
+
+            "decision":
+                decision,
+        },
+
+        "interpretation":
+            interpretation,
+
+        "important_warning":
+            (
+                "Passing this diagnostic does NOT justify using "
+                "any observed quartile boundary as a trading threshold. "
+                "A V1.6 rule would require a separately pre-specified "
+                "rule and independent validation."
+            ),
+
+        "data_errors":
+            errors,
+    }
+
+
+# ============================================================
+# API ENDPOINT
+# ============================================================
+
+@app.get(
+    "/v13-ema-time-stability"
+)
+def v13_ema_time_stability_endpoint():
+
+    try:
+
+        return (
+            run_v13_ema_time_stability()
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+
+            status_code=400,
+
+            detail=str(
+                exc
+            ),
+        )
